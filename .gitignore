@@ -1,0 +1,33 @@
+# Generated configuration files (downloaded/created by mzk3)
+sample-values-k3s.yaml
+sample-materialize.yaml
+sample-postgres.yaml
+sample-minio.yaml
+mz-prometheus-scrape.yml
+monitoring-values.yaml
+mz-dashboard.json
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-*
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.env
