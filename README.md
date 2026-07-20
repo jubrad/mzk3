@@ -315,6 +315,41 @@ kubectl logs -n materialize -l app.kubernetes.io/name=materialize-operator --tai
 - Wait a few minutes for scraping to begin
 - Check Prometheus targets: Access Prometheus UI > Status > Targets
 
+## Development
+
+A Python rewrite of `mzk3` is in progress under `src/mzk3/`. The bash `mzk3`
+script remains the supported entry point until the Python version reaches
+parity; the Python CLI exposes the same commands and flags.
+
+### Layout
+
+```
+src/mzk3/
+  config.py     # Config dataclass + resolve(): defaults < env < flags
+  patch.py      # pure YAML transforms (replaces the bash `sed` edits)
+  commands.py   # pure argv builders (helm/kubectl/k3d) + download URLs
+  runner.py     # the single subprocess boundary (test seams: dry_run, responder)
+  log.py        # colored [INFO]/[WARN]/[STEP] output
+  cli.py        # orchestration: wires the tested core to a live cluster
+  data/         # bundled monitoring assets (dashboard, prometheus values)
+tests/          # pytest suite
+```
+
+Side effects flow through a single `Runner`. Pure logic (config, patching,
+command builders) is tested directly; command flows are tested with a dry-run
+`Runner` that records the argv it would execute — no cluster or network needed.
+
+### Setup and tests
+
+```bash
+# Requires uv (https://docs.astral.sh/uv/)
+uv run pytest              # run the test suite
+uv run mzk3 --help         # run the Python CLI
+```
+
+Tests are the source of truth for the port — add or update a test before
+changing behavior.
+
 ## License
 
 See [Materialize License](https://github.com/MaterializeInc/materialize/blob/main/LICENSE) for details.

@@ -1,11 +1,20 @@
-# Generated configuration files (downloaded/created by mzk3)
-sample-values-k3s.yaml
-sample-materialize.yaml
-sample-postgres.yaml
-sample-minio.yaml
-mz-prometheus-scrape.yml
-monitoring-values.yaml
-mz-dashboard.json
+# Generated configuration files (downloaded/created by mzk3, at repo root only)
+/sample-values-k3s.yaml
+/sample-materialize.yaml
+/sample-postgres.yaml
+/sample-minio.yaml
+/mz-prometheus-scrape.yml
+/monitoring-values.yaml
+/mz-dashboard.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
 
 # Backup files
 *.bak

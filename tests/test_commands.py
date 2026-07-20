@@ -1,0 +1,78 @@
+"""Builders that assemble argv lists for helm / kubectl / k3d.
+
+Pure: given a Config they return a list of strings, no subprocess.
+"""
+
+import json
+
+from mzk3.config import resolve
+from mzk3 import commands as c
+
+
+def cfg(*argv, env=None):
+    _, config = resolve(list(argv), env=env or {})
+    return config
+
+
+def test_k3d_create_cluster_carries_label():
+    argv = c.k3d_create("mzk3-cluster")
+    assert argv[:3] == ["k3d", "cluster", "create"]
+    assert "mzk3-cluster" in argv
+    assert "--runtime-label" in argv
+    i = argv.index("--runtime-label")
+    assert argv[i + 1] == "created-by=mzk3@server:*"
+
+
+def test_operator_install_uses_versions_and_values():
+    conf = cfg("install", "-v", "v27.0.0")
+    argv = c.operator_install(conf)
+    assert argv[:3] == ["helm", "upgrade", "--install"]
+    assert conf.release_name in argv
+    assert "materialize/materialize-operator" in argv
+    assert "--version" in argv and argv[argv.index("--version") + 1] == "v27.0.0"
+    assert "--namespace=materialize" in argv
+    assert "-f" in argv and argv[argv.index("-f") + 1] == conf.values_file
+    assert "--wait" in argv
+
+
+def test_instance_image_patch_is_valid_merge_json():
+    argv = c.patch_instance_image("mymz", "materialize-environment", "v27.0.0")
+    assert argv[:2] == ["kubectl", "patch"]
+    assert "materialize" in argv and "mymz" in argv
+    assert argv[argv.index("--type") + 1] == "merge"
+    payload = json.loads(argv[argv.index("-p") + 1])
+    assert payload == {"spec": {"environmentdImageRef": "materialize/environmentd:v27.0.0"}}
+
+
+def test_rollout_patch_without_force_sets_only_request():
+    argv = c.patch_rollout("mymz", "materialize-environment", "UUID-1", force=False)
+    payload = json.loads(argv[argv.index("-p") + 1])
+    assert payload == {"spec": {"requestRollout": "UUID-1"}}
+
+
+def test_rollout_patch_with_force_sets_both():
+    argv = c.patch_rollout("mymz", "materialize-environment", "UUID-1", force=True)
+    payload = json.loads(argv[argv.index("-p") + 1])
+    assert payload == {"spec": {"requestRollout": "UUID-1", "forceRollout": "UUID-1"}}
+
+
+def test_operator_upgrade_targets_operator_version_not_mz_version():
+    conf = cfg("upgrade", "-v", "v27.0.0", "-o", "v26.5.0")
+    argv = c.operator_upgrade(conf)
+    assert argv[:2] == ["helm", "upgrade"]
+    assert "--install" not in argv  # upgrade, not install
+    assert argv[argv.index("--version") + 1] == "v26.5.0"
+
+
+def test_download_url_for_operator_values_uses_operator_version():
+    conf = cfg("install", "-v", "v27.0.0", "-o", "v26.5.0")
+    url = c.operator_values_url(conf)
+    assert "v26.5.0" in url
+    assert url.endswith("misc/helm-charts/operator/values.yaml")
+
+
+def test_download_url_for_materialize_uses_mz_version():
+    conf = cfg("install", "-v", "v27.0.0", "-o", "v26.5.0")
+    url = c.materialize_manifest_url(conf)
+    assert "v27.0.0" in url
+    assert url.endswith("misc/helm-charts/testing/materialize.yaml")
