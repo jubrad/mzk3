@@ -1,10 +1,10 @@
 # Materialize on k3s/k3d
 
-A deployment script for running [Materialize](https://materialize.com/) self-managed on local k3s/k3d Kubernetes clusters.
+A deployment tool for running [Materialize](https://materialize.com/) self-managed on local k3s/k3d Kubernetes clusters.
 
 ## Overview
 
-`mzk3` is a unified script that handles the complete lifecycle of a Materialize deployment:
+`mzk3` is a Python CLI that handles the complete lifecycle of a Materialize deployment:
 
 - **Create Cluster** - Create a new k3d cluster for Materialize
 - **Install** - Deploy Materialize with all required dependencies
@@ -15,6 +15,7 @@ A deployment script for running [Materialize](https://materialize.com/) self-man
 
 ## Prerequisites
 
+- [Python](https://www.python.org/) 3.11+
 - [k3d](https://k3d.io/) - k3s in Docker (for local development)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Helm](https://helm.sh/docs/intro/install/) v3+
@@ -27,6 +28,21 @@ A deployment script for running [Materialize](https://materialize.com/) self-man
 brew install k3d
 ```
 
+### Install the CLI
+
+```bash
+# Install as a tool (recommended; requires uv - https://docs.astral.sh/uv/)
+uv tool install .
+
+# ...or with pip
+pip install .
+
+# ...or run without installing, from the repo root
+uv run mzk3 <command>
+```
+
+Once installed, invoke it as `mzk3`.
+
 Note: You don't need to create the cluster manually. Use `mzk3 create-cluster` or `mzk3 install --create-cluster` instead.
 
 ## Installation
@@ -35,11 +51,11 @@ Note: You don't need to create the cluster manually. Use `mzk3 create-cluster` o
 
 ```bash
 # Create cluster and install in one step
-./mzk3 install --create-cluster
+mzk3 install --create-cluster
 
 # Or create cluster first, then install
-./mzk3 create-cluster
-./mzk3 install
+mzk3 create-cluster
+mzk3 install
 ```
 
 This will:
@@ -53,16 +69,16 @@ This will:
 
 ```bash
 # Install a specific version
-./mzk3 install -v v26.12.1
+mzk3 install -v v26.12.1
 
 # Install with a license key
-./mzk3 install --license-key /path/to/license.key
+mzk3 install --license-key /path/to/license.key
 
 # Install with Prometheus/Grafana monitoring
-./mzk3 install --install-dashboards
+mzk3 install --install-dashboards
 
 # Combine options
-./mzk3 install -v v26.12.1 --license-key /path/to/license.key --install-dashboards
+mzk3 install -v v26.12.1 --license-key /path/to/license.key --install-dashboards
 ```
 
 ## Commands
@@ -73,27 +89,27 @@ Create a new k3d cluster for Materialize.
 
 ```bash
 # Create with default name (mzk3-cluster)
-./mzk3 create-cluster
+mzk3 create-cluster
 
 # Create with custom name
-./mzk3 create-cluster -c my-cluster
+mzk3 create-cluster -c my-cluster
 ```
 
-The script tracks which clusters it creates. The `install` command will only work on clusters created by mzk3 (use `--force` to bypass this check).
+mzk3 tracks which clusters it creates. The `install` command will only work on clusters created by mzk3 (use `--force` to bypass this check).
 
 ### install
 
 Deploy Materialize and all dependencies.
 
 ```bash
-./mzk3 install [options]
+mzk3 install [options]
 ```
 
 **Cluster Safety:** By default, `install` only works on clusters created by mzk3. This prevents accidental modifications to existing clusters. Options:
 - Use `--create-cluster` to create a new cluster and install in one step
 - Use `--force` to install on any cluster (bypasses the safety check)
 
-**Idempotent:** Running `install` multiple times is safe. The script checks existing versions and skips components that are already at the requested version.
+**Idempotent:** Running `install` multiple times is safe. mzk3 checks existing versions and skips components that are already at the requested version.
 
 ### upgrade
 
@@ -101,13 +117,13 @@ Upgrade an existing Materialize deployment to a new version.
 
 ```bash
 # Standard upgrade
-./mzk3 upgrade -v v26.12.1
+mzk3 upgrade -v v26.12.1
 
 # Force upgrade (bypasses safety checks)
-./mzk3 upgrade -v v26.12.1 --force
+mzk3 upgrade -v v26.12.1 --force
 
 # Skip confirmation prompt
-./mzk3 upgrade -v v26.12.1 -y
+mzk3 upgrade -v v26.12.1 -y
 ```
 
 The upgrade process:
@@ -120,10 +136,10 @@ The upgrade process:
 Destroy and recreate the k3d cluster. **Warning: This deletes all data.**
 
 ```bash
-./mzk3 reset
+mzk3 reset
 
 # Skip confirmation
-./mzk3 reset -y
+mzk3 reset -y
 ```
 
 ### status
@@ -131,7 +147,7 @@ Destroy and recreate the k3d cluster. **Warning: This deletes all data.**
 Check the status of your Materialize deployment.
 
 ```bash
-./mzk3 status
+mzk3 status
 ```
 
 ### list-versions
@@ -139,7 +155,7 @@ Check the status of your Materialize deployment.
 Show available Materialize versions from the Helm repository.
 
 ```bash
-./mzk3 list-versions
+mzk3 list-versions
 ```
 
 ## Configuration Options
@@ -193,7 +209,7 @@ From within the cluster, connect to:
 
 ## Monitoring
 
-When installed with `--install-dashboards`, the script deploys:
+When installed with `--install-dashboards`, mzk3 deploys:
 - **Prometheus** - Metrics collection and storage
 - **Grafana** - Visualization dashboards
 
@@ -317,9 +333,7 @@ kubectl logs -n materialize -l app.kubernetes.io/name=materialize-operator --tai
 
 ## Development
 
-A Python rewrite of `mzk3` is in progress under `src/mzk3/`. The bash `mzk3`
-script remains the supported entry point until the Python version reaches
-parity; the Python CLI exposes the same commands and flags.
+`mzk3` is a Python package under `src/mzk3/`, built test-first.
 
 ### Layout
 
