@@ -85,6 +85,34 @@ def patch_instance_image(name: str, instance_ns: str, version: str) -> list[str]
     ]
 
 
+_ENVIRONMENTD_SELECTOR = "materialize.cloud/app=environmentd"
+
+
+def get_environmentd_pods(instance_ns: str) -> list[str]:
+    """List environmentd pod names (used to poll for the pod appearing)."""
+    return [
+        "kubectl", "get", "pod",
+        "-l", _ENVIRONMENTD_SELECTOR,
+        "-n", instance_ns,
+        "-o", "name",
+    ]
+
+
+def wait_environmentd(instance_ns: str, timeout: str = "600s") -> list[str]:
+    """Wait for the environmentd pod(s) to become Ready.
+
+    environmentd is a StatefulSet, so we wait on pod readiness by the
+    operator's `materialize.cloud/app` label rather than a Deployment's
+    `available` condition.
+    """
+    return [
+        "kubectl", "wait", "--for=condition=Ready", "pod",
+        "-l", _ENVIRONMENTD_SELECTOR,
+        "-n", instance_ns,
+        f"--timeout={timeout}",
+    ]
+
+
 def patch_rollout(name: str, instance_ns: str, uuid: str, *, force: bool) -> list[str]:
     spec: dict[str, str] = {"requestRollout": uuid}
     if force:

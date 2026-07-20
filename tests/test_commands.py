@@ -76,3 +76,26 @@ def test_download_url_for_materialize_uses_mz_version():
     url = c.materialize_manifest_url(conf)
     assert "v27.0.0" in url
     assert url.endswith("misc/helm-charts/testing/materialize.yaml")
+
+
+def test_environmentd_pods_selector_matches_the_operator_labels():
+    # environmentd runs as a StatefulSet; its pods carry materialize.cloud/app,
+    # NOT app.kubernetes.io/component. (The old deployment selector matched
+    # nothing and the readiness wait silently no-op'd.)
+    argv = c.get_environmentd_pods("materialize-environment")
+    assert argv[:3] == ["kubectl", "get", "pod"]
+    assert "-l" in argv and argv[argv.index("-l") + 1] == "materialize.cloud/app=environmentd"
+    assert argv[argv.index("-n") + 1] == "materialize-environment"
+    assert argv[argv.index("-o") + 1] == "name"
+
+
+def test_wait_environmentd_waits_on_pod_readiness():
+    argv = c.wait_environmentd("materialize-environment", timeout="120s")
+    assert argv[:2] == ["kubectl", "wait"]
+    assert "pod" in argv
+    assert "--for=condition=Ready" in argv
+    assert argv[argv.index("-l") + 1] == "materialize.cloud/app=environmentd"
+    assert "--timeout=120s" in argv
+    # must NOT use the dead deployment/component selector
+    assert "deployment" not in argv
+    assert "app.kubernetes.io/component=environmentd" not in argv

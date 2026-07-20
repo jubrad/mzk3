@@ -357,9 +357,16 @@ command builders) is tested directly; command flows are tested with a dry-run
 
 ```bash
 # Requires uv (https://docs.astral.sh/uv/)
-uv run pytest              # run the test suite
-uv run mzk3 --help         # run the Python CLI
+uv run pytest                    # fast, hermetic unit suite (no cluster)
+uv run pytest --run-integration  # also spin up a real k3d cluster end to end
+uv run mzk3 --help               # run the Python CLI
 ```
+
+The unit suite is pure and runs in well under a second. Integration tests
+(`tests/test_integration.py`, marked `integration`) are skipped unless
+`--run-integration` is passed; they create a throwaway k3d cluster, install
+Materialize, assert the environmentd pod reaches `Ready`, and tear the cluster
+down. They need docker/k3d/kubectl/helm on PATH plus network access.
 
 Tests are the source of truth for the port — add or update a test before
 changing behavior.

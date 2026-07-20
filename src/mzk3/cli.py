@@ -455,6 +455,32 @@ def _current_instance_image(runner: Runner, cfg: Config) -> str:
     return res.stdout if res.ok else ""
 
 
+def _wait_environmentd_ready(runner: Runner, cfg: Config) -> None:
+    """Wait for the environmentd StatefulSet pod to appear, then to be Ready.
+
+    `kubectl wait` errors immediately if nothing matches yet, so poll for the
+    pod to show up first (the operator creates it a beat after the CR is
+    applied/patched).
+    """
+    if not runner.dry_run:
+        time.sleep(10)
+    for _ in range(30):
+        pods = runner.run(c.get_environmentd_pods(cfg.instance_ns),
+                          check=False, capture=True)
+        if pods.stdout.strip():
+            break
+        if runner.dry_run:
+            break
+        time.sleep(5)
+    else:
+        log.warn(f"environmentd pod never appeared. Check: kubectl get pods "
+                 f"-n {cfg.instance_ns}")
+        return
+    if not runner.run(c.wait_environmentd(cfg.instance_ns), check=False).ok:
+        log.warn(f"Timeout waiting for environmentd to be Ready. Check: "
+                 f"kubectl get pods -n {cfg.instance_ns}")
+
+
 def _deploy_or_skip_instance(runner: Runner, cfg: Config) -> None:
     target = f"materialize/environmentd:{cfg.version}"
     if _current_instance_image(runner, cfg) == target:
@@ -463,16 +489,7 @@ def _deploy_or_skip_instance(runner: Runner, cfg: Config) -> None:
     log.step("Deploying Materialize instance...")
     apply_manifest(runner, "sample-materialize.yaml")
     log.info("Waiting for Materialize instance to be ready...")
-    if not runner.dry_run:
-        time.sleep(10)
-    if not runner.run(
-        ["kubectl", "wait", "--for=condition=available", "--timeout=600s",
-         "deployment", "-l", "app.kubernetes.io/component=environmentd",
-         "-n", cfg.instance_ns],
-        check=False,
-    ).ok:
-        log.warn(f"Timeout waiting for environmentd. Check: kubectl get pods "
-                 f"-n {cfg.instance_ns}")
+    _wait_environmentd_ready(runner, cfg)
 
 
 # --- upgrade sub-steps ---------------------------------------------------
@@ -500,15 +517,7 @@ def _upgrade_instance(runner: Runner, cfg: Config, instance: str) -> None:
     runner.run(c.patch_rollout(instance, cfg.instance_ns, rollout, force=cfg.force))
 
     log.info("Rollout triggered. Waiting for new pods to be ready...")
-    if not runner.dry_run:
-        time.sleep(10)
-    if not runner.run(
-        ["kubectl", "wait", "--for=condition=available", "--timeout=600s",
-         "deployment", "-l", "app.kubernetes.io/component=environmentd",
-         "-n", cfg.instance_ns],
-        check=False,
-    ).ok:
-        log.warn("Timeout waiting for environmentd. Check status manually.")
+    _wait_environmentd_ready(runner, cfg)
 
 
 def _uuidgen(runner: Runner) -> str:

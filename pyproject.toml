@@ -22,6 +22,9 @@ dev = ["pytest>=8"]
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["src"]
+markers = [
+    "integration: spins up a real k3d cluster and installs Materialize (slow, needs docker/k3d/kubectl/helm + network)",
+]
 
 [tool.pyright]
 include = ["src", "tests"]
