@@ -1,6 +1,16 @@
 """Pure text transforms that replace the bash `sed` calls."""
 
-from mzk3.patch import patch_environmentd_image, patch_license_key, patch_region
+from mzk3.patch import (
+    patch_environmentd_image,
+    patch_license_key,
+    patch_persist_backend_host,
+    patch_region,
+)
+
+_SECRET = (
+    's3://minio:minio123@bucket/12345678-1234-1234-1234-123456789012'
+    "?endpoint=http%3A%2F%2Fminio.materialize.svc.cluster.local%3A9000&region=minio"
+)
 
 
 def test_patch_region_kind_to_k3s():
@@ -41,3 +51,17 @@ def test_patch_license_key_fills_empty():
 def test_patch_license_key_strips_newlines_from_key():
     # bash did `cat file | tr -d '\n'`
     assert patch_license_key('license_key: ""', "ABC\n123\n") == 'license_key: "ABC123"'
+
+
+def test_patch_persist_backend_host_swaps_only_the_fqdn():
+    out = patch_persist_backend_host(_SECRET, "minio", "rustfs")
+    # endpoint host is repointed...
+    assert "rustfs.materialize.svc.cluster.local" in out
+    assert "minio.materialize.svc.cluster.local" not in out
+    # ...but the credentials and bucket (which also contain "minio") are untouched
+    assert "s3://minio:minio123@bucket/" in out
+    assert "region=minio" in out
+
+
+def test_patch_persist_backend_host_noop_for_minio():
+    assert patch_persist_backend_host(_SECRET, "minio", "minio") == _SECRET

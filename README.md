@@ -61,9 +61,25 @@ mzk3 install
 This will:
 1. Download required configuration files from the Materialize repository
 2. Deploy PostgreSQL (metadata backend)
-3. Deploy MinIO (S3-compatible blob storage)
+3. Deploy the S3-compatible blob storage backend (MinIO by default; RustFS with `--storage-backend rustfs`)
 4. Install the Materialize Operator via Helm
 5. Deploy a Materialize instance
+
+### Storage backend
+
+Materialize persist needs S3-compatible blob storage. Two backends are supported:
+
+```bash
+mzk3 install --storage-backend minio    # default
+mzk3 install --storage-backend rustfs    # RustFS (https://github.com/rustfs/rustfs)
+```
+
+RustFS is deployed with credentials matching the Materialize CR; mzk3 repoints
+the persist endpoint to the `rustfs` service and creates the required buckets
+via a one-shot Job (RustFS has no built-in bucket bootstrap). Both backends are
+covered by the integration suite (`pytest --run-integration`), which asserts
+environmentd reaches `Ready` and that persist objects actually land in the
+bucket.
 
 ### Install with Options
 
@@ -169,6 +185,7 @@ mzk3 list-versions
 | `-r, --release-name` | `MZ_RELEASE_NAME` | `my-materialize-operator` | Helm release name |
 | `-l, --license-key` | `MZ_LICENSE_KEY` | - | Path to license key file |
 | `-c, --cluster` | `K3D_CLUSTER_NAME` | `mzk3-cluster` | k3d cluster name |
+| `--storage-backend` | `MZ_STORAGE_BACKEND` | `minio` | S3-compatible blob backend: `minio` or `rustfs` |
 | `--install-dashboards` | `MZ_INSTALL_DASHBOARDS` | `false` | Install Prometheus/Grafana stack |
 | `--create-cluster` | - | `false` | Create k3d cluster before install |
 | `--force` | - | `false` | Force operation (upgrade: forceRollout; install: bypass cluster check) |

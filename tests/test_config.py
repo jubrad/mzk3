@@ -72,6 +72,22 @@ def test_env_operator_version_still_lets_version_flag_stand_alone():
     assert cfg.operator_version == "v26.1.0"
 
 
+def test_storage_backend_defaults_to_minio():
+    _, cfg = resolve(["install"])
+    assert cfg.storage_backend == "minio"
+
+
+def test_storage_backend_from_env():
+    _, cfg = resolve(["install"], env={"MZ_STORAGE_BACKEND": "rustfs"})
+    assert cfg.storage_backend == "rustfs"
+
+
+def test_storage_backend_flag_overrides_env():
+    _, cfg = resolve(["install", "--storage-backend", "rustfs"],
+                     env={"MZ_STORAGE_BACKEND": "minio"})
+    assert cfg.storage_backend == "rustfs"
+
+
 def test_long_flags():
     _, cfg = resolve(
         [
