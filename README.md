@@ -236,10 +236,21 @@ in `src/mzk3/commands.py` to track a newer release.
 ```bash
 GRAFANA=$(kubectl -n monitoring get svc -o name | grep grafana | head -1)
 kubectl port-forward -n monitoring $GRAFANA 3000:80
+# admin password:
+kubectl get secret mz-monitoring-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d; echo
 ```
 
-Then open http://localhost:3000 and look for the **Materialize Overview**
-dashboard. See the upstream repository for dashboard details and configuration.
+Then open http://localhost:3000 (user `admin`).
+
+> **Known limitation (upstream, v0.6.0):** the bundled dashboards ship as
+> Grafana 13 app-platform (`dashboard.grafana.app/v2`) resources delivered via
+> grafana-operator `GrafanaManifest`. mzk3 works around a chart bug so the
+> operator can authenticate to the bundled Grafana (the chart otherwise
+> references an admin-credentials secret it never creates and a wrong service
+> URL), and the manifest reports as applied — but the v2 dashboards do not yet
+> render in Grafana in this stack (alpha app-platform behavior). Prometheus/
+> Alloy metrics collection works; dashboard rendering is expected to improve as
+> the upstream chart matures. Track upstream materialize-monitoring for status.
 
 ## Architecture
 

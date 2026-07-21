@@ -594,6 +594,17 @@ def install_monitoring(runner: Runner) -> None:
         # mapped on a fresh cluster. With the chart default (false) the CRDs
         # land in templates/ and a first-time install fails.
         "--set", "grafana-operator.crds.immutable=true",
+        # v0.6.0 bug: in bundled mode the Grafana CR points at a creds secret
+        # the chart never creates (`<fullname>-grafana-admin-credentials`) and
+        # a URL using the wrong (fullname-based) host, so grafana-operator
+        # can't authenticate to the bundled Grafana. Point it at the real
+        # subchart service + admin secret.
+        "--set", "connections.grafana.external.url="
+                 "http://mz-monitoring-grafana.monitoring.svc.cluster.local:80",
+        "--set", "connections.grafana.external.adminUser.name=mz-monitoring-grafana",
+        "--set", "connections.grafana.external.adminUser.key=admin-user",
+        "--set", "connections.grafana.external.adminPassword.name=mz-monitoring-grafana",
+        "--set", "connections.grafana.external.adminPassword.key=admin-password",
         "--wait", "--timeout", "15m",
     ])
 
