@@ -25,10 +25,6 @@ def postgres_manifest_url(cfg: Config) -> str:
     return f"{_RAW}/{cfg.version}/misc/helm-charts/testing/postgres.yaml"
 
 
-def minio_manifest_url(cfg: Config) -> str:
-    return f"{_RAW}/{cfg.version}/misc/helm-charts/testing/minio.yaml"
-
-
 def materialize_manifest_url(cfg: Config) -> str:
     return f"{_RAW}/{cfg.version}/misc/helm-charts/testing/materialize.yaml"
 

@@ -2,7 +2,7 @@
 /sample-values-k3s.yaml
 /sample-materialize.yaml
 /sample-postgres.yaml
-/sample-minio.yaml
+/rustfs.yaml
 /mz-prometheus-scrape.yml
 /monitoring-values.yaml
 /mz-dashboard.json

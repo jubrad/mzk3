@@ -282,18 +282,17 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
 
     log.step("Deploying PostgreSQL backend...")
     apply_manifest(runner, "sample-postgres.yaml")
-    _deploy_storage_backend(runner, cfg)
+    _deploy_rustfs(runner)
 
     _ensure_metrics_server(runner)
 
     log.step("Waiting for backends to be ready...")
-    for dep in ("postgres", cfg.storage_backend):
+    for dep in ("postgres", "rustfs"):
         runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
                     f"deployment/{dep}", "-n", "materialize"], check=False)
-    if cfg.storage_backend == "rustfs":
-        log.info("Waiting for RustFS buckets to be created...")
-        runner.run(["kubectl", "wait", "--for=condition=complete", "--timeout=300s",
-                    "job/rustfs-createbuckets", "-n", "materialize"], check=False)
+    log.info("Waiting for RustFS buckets to be created...")
+    runner.run(["kubectl", "wait", "--for=condition=complete", "--timeout=300s",
+                "job/rustfs-createbuckets", "-n", "materialize"], check=False)
 
     _install_or_skip_operator(runner, cfg)
     _deploy_or_skip_instance(runner, cfg)
@@ -376,21 +375,15 @@ def _download_configs(runner: Runner, cfg: Config) -> None:
     log.step("Downloading Materialize configuration files...")
     download(c.operator_values_url(cfg), "sample-values-k3s.yaml")
     download(c.postgres_manifest_url(cfg), "sample-postgres.yaml")
-    if cfg.storage_backend == "minio":
-        download(c.minio_manifest_url(cfg), "sample-minio.yaml")
     download(c.materialize_manifest_url(cfg), "sample-materialize.yaml")
     log.info("All configuration files downloaded successfully.")
 
 
-def _deploy_storage_backend(runner: Runner, cfg: Config) -> None:
-    if cfg.storage_backend == "rustfs":
-        log.step("Deploying RustFS storage backend...")
-        rustfs = resources.files("mzk3.data") / "rustfs.yaml"
-        Path("rustfs.yaml").write_text(rustfs.read_text())
-        apply_manifest(runner, "rustfs.yaml")
-    else:
-        log.step("Deploying MinIO storage backend...")
-        apply_manifest(runner, "sample-minio.yaml")
+def _deploy_rustfs(runner: Runner) -> None:
+    log.step("Deploying RustFS storage backend...")
+    rustfs = resources.files("mzk3.data") / "rustfs.yaml"
+    Path("rustfs.yaml").write_text(rustfs.read_text())
+    apply_manifest(runner, "rustfs.yaml")
 
 
 def _patch_configs(runner: Runner, cfg: Config) -> None:
@@ -404,9 +397,10 @@ def _patch_configs(runner: Runner, cfg: Config) -> None:
     mz = Path("sample-materialize.yaml")
     mz.write_text(patch.patch_environmentd_image(mz.read_text(), cfg.version))
 
-    if cfg.storage_backend == "rustfs":
-        log.info("Repointing persist backend endpoint to RustFS...")
-        mz.write_text(patch.patch_persist_backend_host(mz.read_text(), "minio", "rustfs"))
+    # The upstream Materialize CR ships pointing at a `minio` service; repoint
+    # persist at our RustFS service.
+    log.info("Repointing persist backend endpoint to RustFS...")
+    mz.write_text(patch.patch_persist_backend_host(mz.read_text(), "minio", "rustfs"))
 
     if cfg.license_key_file:
         key_path = Path(cfg.license_key_file)

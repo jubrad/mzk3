@@ -79,7 +79,6 @@ class Config:
     force: bool
     install_dashboards: bool
     create_cluster: bool
-    storage_backend: str
 
 
 def _env_bool(env: Mapping[str, str], key: str) -> bool:
@@ -156,10 +155,6 @@ def build_parser(env: Mapping[str, str] | None = None) -> argparse.ArgumentParse
     p.add_argument("--create-cluster", dest="create_cluster",
                    action="store_true", default=False,
                    help="create the k3d cluster before installing (install only)")
-    p.add_argument("--storage-backend", dest="storage_backend",
-                   choices=("minio", "rustfs"),
-                   default=env.get("MZ_STORAGE_BACKEND", "minio"),
-                   help="S3-compatible blob storage backend (default: minio)")
     p.add_argument("-h", "--help", action="help",
                    help="show this help message and exit")
     return p
@@ -186,6 +181,5 @@ def resolve(argv: list[str], env: Mapping[str, str] | None = None) -> tuple[str,
         force=ns.force,
         install_dashboards=ns.install_dashboards,
         create_cluster=ns.create_cluster,
-        storage_backend=ns.storage_backend,
     )
     return ns.command, cfg
