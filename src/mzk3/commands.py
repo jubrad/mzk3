@@ -27,6 +27,19 @@ def monitoring_tarball_url(version: str = MONITORING_VERSION) -> str:
     )
 
 
+# RustFS operator (github.com/rustfs/operator). Deployed from the release tag's
+# in-repo helm chart. Operator requires S3 credentials >= 8 chars.
+RUSTFS_OPERATOR_VERSION = "0.0.5"
+RUSTFS_ACCESS_KEY = "minioadmin"
+RUSTFS_SECRET_KEY = "minioadmin"
+# The Tenant named `rustfs` exposes its S3 API on service `rustfs-io:9000`.
+RUSTFS_S3_HOST = "rustfs-io.materialize.svc.cluster.local"
+
+
+def rustfs_operator_tarball_url(version: str = RUSTFS_OPERATOR_VERSION) -> str:
+    return f"https://codeload.github.com/rustfs/operator/tar.gz/refs/tags/{version}"
+
+
 # --- download URLs -------------------------------------------------------
 
 def operator_values_url(cfg: Config) -> str:

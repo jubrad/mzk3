@@ -45,7 +45,7 @@ def patch_environmentd_resources(text: str, cpu: str) -> str:
 
 def patch_persist_backend_host(text: str, from_name: str, to_name: str) -> str:
     """Repoint the persist backend S3 endpoint from one in-cluster service to
-    another (e.g. minio -> rustfs).
+    another (e.g. minio -> rustfs-io).
 
     Targets the fully-qualified service DNS name specifically so it never
     touches the credentials, bucket name, or region, which also contain the
@@ -53,6 +53,17 @@ def patch_persist_backend_host(text: str, from_name: str, to_name: str) -> str:
     """
     suffix = ".materialize.svc.cluster.local"
     return text.replace(f"{from_name}{suffix}", f"{to_name}{suffix}")
+
+
+def patch_persist_backend_creds(text: str, access_key: str, secret_key: str) -> str:
+    """Rewrite the persist backend URL's S3 credentials (userinfo).
+
+    The upstream CR ships `s3://minio:minio123@bucket/...`; RustFS via the
+    operator needs >=8-char credentials, so swap the userinfo.
+    """
+    return text.replace(
+        "s3://minio:minio123@", f"s3://{access_key}:{secret_key}@"
+    )
 
 
 def patch_license_key(text: str, key: str) -> str:

@@ -61,19 +61,29 @@ mzk3 install
 This will:
 1. Download required configuration files from the Materialize repository
 2. Deploy PostgreSQL (metadata backend)
-3. Deploy RustFS (S3-compatible blob storage for persist)
+3. Install the RustFS operator and deploy a RustFS Tenant (S3 blob storage for persist)
 4. Install the Materialize Operator via Helm
 5. Deploy a Materialize instance
 
 ### Storage backend
 
 Materialize persist needs S3-compatible blob storage.
-[RustFS](https://github.com/rustfs/rustfs) is used for this. mzk3 deploys it
-with credentials matching the Materialize CR, repoints the persist endpoint to
-the `rustfs` service, and creates the required buckets via a one-shot Job
-(RustFS has no built-in bucket bootstrap). The integration suite
-(`pytest --run-integration`) asserts environmentd reaches `Ready` and that
-persist objects actually land in the bucket.
+[RustFS](https://github.com/rustfs/rustfs) provides it, deployed via the
+[RustFS operator](https://github.com/rustfs/operator) (pinned to a release tag,
+installed from its in-repo helm chart into `rustfs-system`). mzk3 then applies a
+`Tenant` CR (`rustfs`, namespace `materialize`):
+
+- **PVC-backed** (durable — survives pod restarts, unlike a plain emptyDir
+  Deployment), single-node (`servers: 1`, `volumesPerServer: 1`).
+- **Buckets auto-created** by the operator (`bucket`, `persist`, `thanos`) — no
+  separate bucket-creation Job.
+- Credentials come from a `rustfs-credentials` secret (`minioadmin`/`minioadmin`;
+  the operator requires ≥8-char keys). mzk3 repoints the Materialize CR's
+  persist endpoint + credentials at the Tenant's S3 service, `rustfs-io:9000`.
+
+The S3 service is `rustfs-io` (plus `rustfs-hl` headless and `rustfs-console`).
+The integration suite (`pytest --run-integration`) asserts environmentd reaches
+`Ready` and that persist objects land in the bucket.
 
 ### Install with Options
 

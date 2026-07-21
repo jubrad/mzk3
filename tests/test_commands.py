@@ -102,6 +102,18 @@ def test_monitoring_tarball_url_defaults_to_pinned_version():
     assert c.MONITORING_VERSION in c.monitoring_tarball_url()
 
 
+def test_rustfs_operator_tarball_url_points_at_pinned_tag():
+    url = c.rustfs_operator_tarball_url()
+    assert url == ("https://codeload.github.com/rustfs/operator/tar.gz/refs/tags/"
+                   + c.RUSTFS_OPERATOR_VERSION)
+
+
+def test_rustfs_credentials_meet_operator_minimum_length():
+    # operator rejects access/secret keys shorter than 8 chars
+    assert len(c.RUSTFS_ACCESS_KEY) >= 8
+    assert len(c.RUSTFS_SECRET_KEY) >= 8
+
+
 def test_environmentd_pods_selector_matches_the_operator_labels():
     # environmentd runs as a StatefulSet; its pods carry materialize.cloud/app,
     # NOT app.kubernetes.io/component. (The old deployment selector matched

@@ -2,7 +2,8 @@
 /sample-values-k3s.yaml
 /sample-materialize.yaml
 /sample-postgres.yaml
-/rustfs.yaml
+/rustfs-operator.tar.gz
+/rustfs-operator-src/
 /monitoring-values.yaml
 /materialize-monitoring.tar.gz
 /materialize-monitoring-src/

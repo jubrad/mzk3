@@ -4,6 +4,7 @@ from mzk3.patch import (
     patch_environmentd_image,
     patch_environmentd_resources,
     patch_license_key,
+    patch_persist_backend_creds,
     patch_persist_backend_host,
     patch_region,
 )
@@ -66,6 +67,15 @@ def test_patch_persist_backend_host_swaps_only_the_fqdn():
 
 def test_patch_persist_backend_host_noop_for_minio():
     assert patch_persist_backend_host(_SECRET, "minio", "minio") == _SECRET
+
+
+def test_patch_persist_backend_creds_rewrites_userinfo():
+    out = patch_persist_backend_creds(_SECRET, "minioadmin", "minioadmin")
+    assert "s3://minioadmin:minioadmin@bucket/" in out
+    assert "s3://minio:minio123@" not in out
+    # host + region untouched by the creds rewrite
+    assert "minio.materialize.svc.cluster.local" in out
+    assert "region=minio" in out
 
 
 _CR = """\

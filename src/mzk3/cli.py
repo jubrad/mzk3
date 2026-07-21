@@ -9,7 +9,6 @@ import tarfile
 import time
 import urllib.request
 import uuid
-from importlib import resources
 from pathlib import Path
 
 from . import commands as c
@@ -303,6 +302,8 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
     log.step("Creating materialize namespace...")
     ensure_namespace(runner, "materialize")
 
+    install_rustfs_operator(runner)
+
     log.step("Deploying PostgreSQL backend...")
     apply_manifest(runner, "sample-postgres.yaml")
     _deploy_rustfs(runner)
@@ -310,12 +311,12 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
     _ensure_metrics_server(runner)
 
     log.step("Waiting for backends to be ready...")
-    for dep in ("postgres", "rustfs"):
-        runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
-                    f"deployment/{dep}", "-n", "materialize"], check=False)
-    log.info("Waiting for RustFS buckets to be created...")
-    runner.run(["kubectl", "wait", "--for=condition=complete", "--timeout=300s",
-                "job/rustfs-createbuckets", "-n", "materialize"], check=False)
+    runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
+                "deployment/postgres", "-n", "materialize"], check=False)
+    log.info("Waiting for RustFS tenant to be ready (buckets auto-created)...")
+    runner.run(["kubectl", "wait",
+                "--for=jsonpath={.status.currentState}=Ready",
+                "tenant/rustfs", "-n", "materialize", "--timeout=300s"], check=False)
 
     _install_or_skip_operator(runner, cfg)
     _deploy_or_skip_instance(runner, cfg)
@@ -408,11 +409,76 @@ def _download_configs(runner: Runner, cfg: Config) -> None:
     log.info("All configuration files downloaded successfully.")
 
 
+def install_rustfs_operator(runner: Runner) -> None:
+    """Install the RustFS operator from its pinned release-tag helm chart."""
+    log.step(f"Installing RustFS operator {c.RUSTFS_OPERATOR_VERSION}...")
+    if runner.dry_run:
+        return
+    tarball = "rustfs-operator.tar.gz"
+    src = Path("rustfs-operator-src")
+    download(c.rustfs_operator_tarball_url(), tarball)
+    src.mkdir(exist_ok=True)
+    with tarfile.open(tarball) as tf:
+        tf.extractall(src, filter="data")
+    root = next(p for p in src.iterdir() if p.is_dir())
+    chart = root / "deploy" / "rustfs-operator"
+    runner.run([
+        "helm", "upgrade", "--install", "rustfs-operator", str(chart),
+        "--namespace", "rustfs-system", "--create-namespace",
+        "--wait", "--timeout", "5m",
+    ])
+
+
 def _deploy_rustfs(runner: Runner) -> None:
-    log.step("Deploying RustFS storage backend...")
-    rustfs = resources.files("mzk3.data") / "rustfs.yaml"
-    Path("rustfs.yaml").write_text(rustfs.read_text())
-    apply_manifest(runner, "rustfs.yaml")
+    """Deploy a RustFS Tenant (operator-managed): PVC-backed, buckets
+    auto-created, S3 on service rustfs-io:9000."""
+    log.step("Deploying RustFS storage backend (Tenant)...")
+    runner.run(["kubectl", "apply", "-f", "-"], text_input=_rustfs_tenant())
+
+
+def _rustfs_tenant() -> str:
+    return f"""\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-credentials
+  namespace: materialize
+type: Opaque
+stringData:
+  accesskey: "{c.RUSTFS_ACCESS_KEY}"
+  secretkey: "{c.RUSTFS_SECRET_KEY}"
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs
+  namespace: materialize
+spec:
+  image: rustfs/rustfs:latest
+  credsSecret:
+    name: rustfs-credentials
+  buckets:
+    - name: bucket
+    - name: persist
+    - name: thanos
+  pools:
+    - name: pool-0
+      servers: 1
+      persistence:
+        volumesPerServer: 1
+        volumeClaimTemplate:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+"""
 
 
 def _patch_configs(runner: Runner, cfg: Config) -> None:
@@ -429,10 +495,13 @@ def _patch_configs(runner: Runner, cfg: Config) -> None:
     log.info("Setting environmentd resources to 2 CPU...")
     mz.write_text(patch.patch_environmentd_resources(mz.read_text(), "2"))
 
-    # The upstream Materialize CR ships pointing at a `minio` service; repoint
-    # persist at our RustFS service.
+    # The upstream Materialize CR ships pointing at a `minio` service with
+    # minio/minio123 creds; repoint persist at the RustFS operator's S3 service
+    # (rustfs-io) with the operator's (>=8 char) credentials.
     log.info("Repointing persist backend endpoint to RustFS...")
-    mz.write_text(patch.patch_persist_backend_host(mz.read_text(), "minio", "rustfs"))
+    mz.write_text(patch.patch_persist_backend_host(mz.read_text(), "minio", "rustfs-io"))
+    mz.write_text(patch.patch_persist_backend_creds(
+        mz.read_text(), c.RUSTFS_ACCESS_KEY, c.RUSTFS_SECRET_KEY))
 
     if cfg.license_key_file:
         key_path = Path(cfg.license_key_file)
@@ -665,9 +734,9 @@ thanos:
         type: S3
         config:
           bucket: thanos
-          endpoint: rustfs.materialize.svc.cluster.local:9000
-          access_key: minio
-          secret_key: minio123
+          endpoint: rustfs-io.materialize.svc.cluster.local:9000
+          access_key: minioadmin
+          secret_key: minioadmin
           insecure: true
 """
 

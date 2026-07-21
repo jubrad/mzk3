@@ -10,6 +10,7 @@ from mzk3.cli import (
     _kubelet_cadvisor_manifests,
     _materialize_podmonitor,
     _mz_metrics_path,
+    _rustfs_tenant,
     ensure_operator_chart_version,
     is_mzk3_cluster,
     list_mzk3_clusters,
@@ -196,6 +197,20 @@ def test_operator_chart_version_untouched_if_repo_unavailable():
     r = Runner(dry_run=True, binaries=ALL_BINS)  # no responder -> empty search
     ensure_operator_chart_version(r, cfg)
     assert cfg.operator_version == "v26.30.0"  # no data, don't guess
+
+
+def test_rustfs_tenant_is_pvc_backed_with_buckets_and_creds():
+    t = _rustfs_tenant()
+    assert "kind: Tenant" in t
+    assert "kind: Secret" in t
+    # buckets auto-created by the operator
+    for b in ("name: bucket", "name: persist", "name: thanos"):
+        assert b in t
+    # PVC-backed (durable), single-node
+    assert "volumeClaimTemplate" in t
+    assert "servers: 1" in t
+    # creds meet the >=8 char minimum
+    assert 'accesskey: "minioadmin"' in t
 
 
 def test_mz_metrics_path_gated_on_version():
