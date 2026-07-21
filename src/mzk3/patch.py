@@ -19,20 +19,21 @@ def patch_environmentd_image(text: str, version: str) -> str:
     )
 
 
-def patch_environmentd_resources(text: str, cpu: str) -> str:
-    """Set the Materialize CR's `environmentdResourceRequirements` CPU.
+def patch_environmentd_resources(text: str, cpu: str, memory: str | None = None) -> str:
+    """Set the Materialize CR's `environmentdResourceRequirements`.
 
     Inserted at the spec level, right after `environmentdImageRef`. Idempotent:
     a no-op if the field is already present.
     """
     if "environmentdResourceRequirements:" in text:
         return text
+    mem = f'\n      memory: "{memory}"' if memory else ""
     block = (
         f'  environmentdResourceRequirements:\n'
         f'    requests:\n'
-        f'      cpu: "{cpu}"\n'
+        f'      cpu: "{cpu}"{mem}\n'
         f'    limits:\n'
-        f'      cpu: "{cpu}"'
+        f'      cpu: "{cpu}"{mem}'
     )
     return re.sub(
         r"^(\s*environmentdImageRef:.*)$",

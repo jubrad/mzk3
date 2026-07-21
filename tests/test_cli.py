@@ -200,7 +200,8 @@ def test_operator_chart_version_untouched_if_repo_unavailable():
 
 
 def test_rustfs_tenant_is_pvc_backed_with_buckets_and_creds():
-    t = _rustfs_tenant()
+    _, cfg = resolve(["install"])
+    t = _rustfs_tenant(cfg)
     assert "kind: Tenant" in t
     assert "kind: Secret" in t
     # buckets auto-created by the operator
@@ -211,6 +212,16 @@ def test_rustfs_tenant_is_pvc_backed_with_buckets_and_creds():
     assert "servers: 1" in t
     # creds meet the >=8 char minimum
     assert 'accesskey: "minioadmin"' in t
+    # default rustfs resources
+    assert 'cpu: "1"' in t
+
+
+def test_rustfs_tenant_honours_config_resources(tmp_path):
+    conf = tmp_path / "c.json"
+    conf.write_text('{"resources": {"rustfs": {"cpu": "4", "memory": "8Gi"}}}')
+    _, cfg = resolve(["install", "--config", str(conf)])
+    t = _rustfs_tenant(cfg)
+    assert 'cpu: "4"' in t and 'memory: "8Gi"' in t
 
 
 def test_mz_metrics_path_gated_on_version():

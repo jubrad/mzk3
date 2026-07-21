@@ -306,7 +306,7 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
 
     log.step("Deploying PostgreSQL backend...")
     apply_manifest(runner, "sample-postgres.yaml")
-    _deploy_rustfs(runner)
+    _deploy_rustfs(runner, cfg)
 
     _ensure_metrics_server(runner)
 
@@ -429,14 +429,17 @@ def install_rustfs_operator(runner: Runner) -> None:
     ])
 
 
-def _deploy_rustfs(runner: Runner) -> None:
+def _deploy_rustfs(runner: Runner, cfg: Config) -> None:
     """Deploy a RustFS Tenant (operator-managed): PVC-backed, buckets
     auto-created, S3 on service rustfs-io:9000."""
     log.step("Deploying RustFS storage backend (Tenant)...")
-    runner.run(["kubectl", "apply", "-f", "-"], text_input=_rustfs_tenant())
+    runner.run(["kubectl", "apply", "-f", "-"], text_input=_rustfs_tenant(cfg))
 
 
-def _rustfs_tenant() -> str:
+def _rustfs_tenant(cfg: Config) -> str:
+    rf = cfg.resources.get("rustfs", {})
+    cpu = rf.get("cpu", "1")
+    memory = rf.get("memory", "1Gi")
     return f"""\
 apiVersion: v1
 kind: Secret
@@ -473,11 +476,11 @@ spec:
               storage: 20Gi
       resources:
         requests:
-          cpu: "500m"
-          memory: "512Mi"
+          cpu: "{cpu}"
+          memory: "{memory}"
         limits:
-          cpu: "1"
-          memory: "1Gi"
+          cpu: "{cpu}"
+          memory: "{memory}"
 """
 
 
@@ -492,8 +495,11 @@ def _patch_configs(runner: Runner, cfg: Config) -> None:
     mz = Path("sample-materialize.yaml")
     mz.write_text(patch.patch_environmentd_image(mz.read_text(), cfg.version))
 
-    log.info("Setting environmentd resources to 2 CPU...")
-    mz.write_text(patch.patch_environmentd_resources(mz.read_text(), "2"))
+    envd = cfg.resources.get("environmentd", {})
+    log.info(f"Setting environmentd resources (cpu={envd.get('cpu')}, "
+             f"memory={envd.get('memory')})...")
+    mz.write_text(patch.patch_environmentd_resources(
+        mz.read_text(), envd.get("cpu", "2"), envd.get("memory")))
 
     # The upstream Materialize CR ships pointing at a `minio` service with
     # minio/minio123 creds; repoint persist at the RustFS operator's S3 service

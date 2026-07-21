@@ -72,6 +72,50 @@ def test_env_operator_version_still_lets_version_flag_stand_alone():
     assert cfg.operator_version == "v26.1.0"
 
 
+def _write(tmp_path, obj):
+    import json
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps(obj))
+    return str(p)
+
+
+def test_config_file_overrides_env_and_defaults(tmp_path):
+    conf = _write(tmp_path, {"version": "v27.1.0", "namespace": "from-config",
+                             "install_dashboards": True})
+    _, cfg = resolve(["install", "--config", conf],
+                     env={"MZ_VERSION": "v26.9.0", "MZ_NAMESPACE": "from-env"})
+    assert cfg.version == "v27.1.0"        # config > env
+    assert cfg.namespace == "from-config"  # config > env
+    assert cfg.install_dashboards is True   # config bool
+
+
+def test_flag_overrides_config(tmp_path):
+    conf = _write(tmp_path, {"version": "v27.1.0"})
+    _, cfg = resolve(["install", "--config", conf, "-v", "v28.0.0"])
+    assert cfg.version == "v28.0.0"  # explicit flag wins over config
+
+
+def test_config_from_env_path(tmp_path):
+    conf = _write(tmp_path, {"cluster_name": "cfg-cluster"})
+    _, cfg = resolve(["install"], env={"MZ_CONFIG": conf})
+    assert cfg.cluster_name == "cfg-cluster"
+
+
+def test_config_resources_merge_over_defaults(tmp_path):
+    # override only rustfs cpu; everything else keeps defaults
+    conf = _write(tmp_path, {"resources": {"rustfs": {"cpu": "4"}}})
+    _, cfg = resolve(["install", "--config", conf])
+    assert cfg.resources["rustfs"]["cpu"] == "4"
+    assert cfg.resources["rustfs"]["memory"] == "1Gi"     # default kept
+    assert cfg.resources["environmentd"]["cpu"] == "2"     # default kept
+
+
+def test_resources_default_when_no_config():
+    _, cfg = resolve(["install"])
+    assert cfg.resources["environmentd"] == {"cpu": "2", "memory": "4Gi"}
+    assert cfg.resources["rustfs"] == {"cpu": "1", "memory": "1Gi"}
+
+
 def test_long_flags():
     _, cfg = resolve(
         [

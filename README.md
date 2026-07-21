@@ -190,9 +190,38 @@ mzk3 list-versions
 | `-l, --license-key` | `MZ_LICENSE_KEY` | - | Path to license key file |
 | `-c, --cluster` | `K3D_CLUSTER_NAME` | `mzk3-cluster` | k3d cluster name |
 | `--install-dashboards` | `MZ_INSTALL_DASHBOARDS` | `false` | Install upstream materialize-monitoring stack |
+| `--config` | `MZ_CONFIG` | - | Path to a JSON config file (see below) |
 | `--create-cluster` | - | `false` | Create k3d cluster before install |
 | `--force` | - | `false` | Force operation (upgrade: forceRollout; install: bypass cluster check) |
 | `-y, --yes` | - | `false` | Skip confirmation prompts |
+
+### Config file
+
+Instead of passing everything on the command line, settings and per-component
+resource limits can be read from a JSON file (`--config file.json` or
+`MZ_CONFIG=file.json`) — a lightweight, declarative alternative to a pile of
+flags.
+
+```json
+{
+  "version": "v26.30.0",
+  "install_dashboards": true,
+  "resources": {
+    "environmentd": {"cpu": "2", "memory": "4Gi"},
+    "rustfs":       {"cpu": "1", "memory": "1Gi"}
+  }
+}
+```
+
+```bash
+mzk3 install --create-cluster --config ./mzk3.json
+```
+
+Precedence (highest wins): **explicit CLI flag > config file > environment
+variable > built-in default**. Any key in the table above may appear in the
+config file (using the long flag name with underscores, e.g. `operator_version`,
+`instance_ns`, `license_key`). The `resources` object is deep-merged over the
+defaults, so you can override just one field (e.g. only `rustfs.cpu`).
 
 ## Accessing Materialize
 
