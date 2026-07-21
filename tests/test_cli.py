@@ -7,6 +7,7 @@ via `responder`, so we assert on the *sequence* of commands each flow issues.
 import json
 
 from mzk3.cli import (
+    _kubelet_cadvisor_manifests,
     _materialize_podmonitor,
     _mz_metrics_path,
     ensure_operator_chart_version,
@@ -203,6 +204,18 @@ def test_mz_metrics_path_gated_on_version():
     assert _mz_metrics_path("v26.24.3") == "/metrics"  # pre-26.25
     assert _mz_metrics_path("v26.4.0") == "/metrics"
     assert _mz_metrics_path("weird") == "/metrics/public"  # default when unparseable
+
+
+def test_kubelet_cadvisor_manifests_include_node_ips_and_scrape_config():
+    m = _kubelet_cadvisor_manifests(["192.168.0.2", "192.168.0.3"])
+    assert "- ip: 192.168.0.2" in m and "- ip: 192.168.0.3" in m
+    assert "path: /metrics/cadvisor" in m
+    assert "kind: ServiceMonitor" in m
+    assert "port: 10250" in m
+    assert "insecureSkipVerify: true" in m
+    # RBAC binds the scraper SA so the kubelet authorizes the token
+    assert "name: alloy-gateway" in m
+    assert "nodes/metrics" in m
 
 
 def test_materialize_podmonitor_targets_the_instance_namespace():

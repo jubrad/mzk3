@@ -723,6 +723,106 @@ spec:
 """
 
 
+def _kubelet_cadvisor_manifests(node_ips: list[str]) -> str:
+    """RBAC + kubelet Service/Endpoints + ServiceMonitor so alloy-gateway
+    scrapes container metrics from each node's kubelet /metrics/cadvisor.
+
+    The chart doesn't scrape the kubelet, and without a running
+    prometheus-operator nothing maintains kubelet Endpoints, so we point them at
+    the node IPs ourselves. Auth uses alloy-gateway's own service-account token
+    (granted nodes/metrics below); TLS to the kubelet is skipped (self-signed).
+    """
+    addresses = "\n".join(f"  - ip: {ip}" for ip in node_ips)
+    return f"""\
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mzk3-kubelet-scrape
+rules:
+- apiGroups: [""]
+  resources: ["nodes/metrics", "nodes/proxy", "nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mzk3-kubelet-scrape
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mzk3-kubelet-scrape
+subjects:
+- kind: ServiceAccount
+  name: alloy-gateway
+  namespace: monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubelet
+  namespace: kube-system
+  labels:
+    mzk3.io/scrape: kubelet
+spec:
+  clusterIP: None
+  ports:
+  - name: https-metrics
+    port: 10250
+    protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: kubelet
+  namespace: kube-system
+  labels:
+    mzk3.io/scrape: kubelet
+subsets:
+- addresses:
+{addresses}
+  ports:
+  - name: https-metrics
+    port: 10250
+    protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-cadvisor
+  namespace: monitoring
+  labels:
+    mzk3.io/scrape: kubelet
+spec:
+  namespaceSelector:
+    matchNames: [kube-system]
+  selector:
+    matchLabels:
+      mzk3.io/scrape: kubelet
+  endpoints:
+  - port: https-metrics
+    scheme: https
+    path: /metrics/cadvisor
+    interval: 30s
+    honorLabels: true
+    tlsConfig:
+      insecureSkipVerify: true
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabelings:
+    - action: replace
+      targetLabel: job
+      replacement: kubelet-cadvisor
+"""
+
+
+def _node_internal_ips(runner: Runner) -> list[str]:
+    res = runner.run(
+        ["kubectl", "get", "nodes", "-o",
+         "jsonpath={.items[*].status.addresses[?(@.type=='InternalIP')].address}"],
+        check=False, capture=True,
+    )
+    return res.stdout.split() if res.ok else []
+
+
 def install_monitoring(runner: Runner, cfg: Config) -> None:
     log.step("Installing upstream Materialize monitoring stack "
              "(materialize-monitoring)...")
@@ -756,6 +856,16 @@ def install_monitoring(runner: Runner, cfg: Config) -> None:
     runner.run(["kubectl", "apply", "-f", "-"],
                text_input=_materialize_podmonitor(cfg.instance_ns,
                                                   _mz_metrics_path(cfg.version)))
+
+    # Container CPU/memory metrics from each node's kubelet (the chart doesn't
+    # scrape the kubelet).
+    node_ips = _node_internal_ips(runner)
+    if node_ips:
+        log.info("Provisioning kubelet cAdvisor scrape...")
+        runner.run(["kubectl", "apply", "-f", "-"],
+                   text_input=_kubelet_cadvisor_manifests(node_ips))
+    elif not runner.dry_run:
+        log.warn("Could not determine node IPs; skipping cAdvisor scrape.")
 
     log.info("Monitoring stack installed successfully.")
 

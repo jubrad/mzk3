@@ -247,6 +247,11 @@ chart leaves incomplete for a self-contained local install:
 - **Grafana auth fix.** Works around a chart bug where the bundled Grafana CR
   references an admin-credentials secret the chart never creates and a wrong
   service URL, so grafana-operator can authenticate and sync dashboards.
+- **Container (cAdvisor) metrics.** Adds a kubelet `ServiceMonitor` (plus a
+  `Service`/`Endpoints` pointed at the node IPs and a small RBAC grant) so
+  alloy-gateway scrapes each node's `/metrics/cadvisor` for container CPU/memory
+  usage — the chart doesn't scrape the kubelet, and nothing else maintains
+  kubelet endpoints without a prometheus-operator.
 
 ### Accessing Grafana
 

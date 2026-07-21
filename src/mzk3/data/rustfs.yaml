@@ -79,8 +79,8 @@ spec:
   selector:
     app: rustfs
 ---
-# RustFS has no `mc`/auto-bucket-creation, so create the persist buckets with
-# a one-shot Job using the MinIO client (S3-generic) once RustFS is reachable.
+# RustFS has no built-in bucket bootstrap, so create the persist buckets with a
+# one-shot Job once RustFS is reachable, using the (S3-generic) MinIO client.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -92,7 +92,7 @@ spec:
     spec:
       restartPolicy: OnFailure
       containers:
-      - name: mc
+      - name: createbuckets
         image: minio/mc
         command:
         - /bin/sh
