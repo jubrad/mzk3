@@ -6,7 +6,13 @@ via `responder`, so we assert on the *sequence* of commands each flow issues.
 
 import json
 
-from mzk3.cli import is_mzk3_cluster, list_mzk3_clusters, main
+from mzk3.cli import (
+    ensure_operator_chart_version,
+    is_mzk3_cluster,
+    list_mzk3_clusters,
+    main,
+)
+from mzk3.config import resolve
 from mzk3.runner import Result, Runner
 
 ALL_BINS = {"kubectl", "helm", "curl", "k3d", "docker", "uuidgen"}
@@ -155,6 +161,38 @@ def test_install_aborts_on_foreign_cluster_without_force():
     assert rc == 1
     # never got as far as touching helm repos / manifests
     assert not ran(r, "kubectl", "apply", "-f", "sample-postgres.yaml")
+
+
+_OP_VERSIONS = [{"version": v} for v in
+                ["v26.33.0", "v26.31.0", "v26.30.1", "v26.29.0"]]
+
+
+def _op_search_responder(argv):
+    if argv[:3] == ["helm", "search", "repo"] and "--versions" in argv:
+        return Result(0, json.dumps(_OP_VERSIONS), "")
+    return None
+
+
+def test_operator_chart_version_falls_back_when_image_version_has_no_chart():
+    # image version v26.30.0 exists but the operator chart repo only has v26.30.1
+    _, cfg = resolve(["install", "-v", "v26.30.0"])
+    r = Runner(dry_run=True, responder=_op_search_responder, binaries=ALL_BINS)
+    ensure_operator_chart_version(r, cfg)
+    assert cfg.operator_version == "v26.33.0"  # latest available
+
+
+def test_operator_chart_version_kept_when_it_exists():
+    _, cfg = resolve(["install", "-v", "v26.30.1"])
+    r = Runner(dry_run=True, responder=_op_search_responder, binaries=ALL_BINS)
+    ensure_operator_chart_version(r, cfg)
+    assert cfg.operator_version == "v26.30.1"
+
+
+def test_operator_chart_version_untouched_if_repo_unavailable():
+    _, cfg = resolve(["install", "-v", "v26.30.0"])
+    r = Runner(dry_run=True, binaries=ALL_BINS)  # no responder -> empty search
+    ensure_operator_chart_version(r, cfg)
+    assert cfg.operator_version == "v26.30.0"  # no data, don't guess
 
 
 def test_install_switches_kubectl_context_before_prerequisites():

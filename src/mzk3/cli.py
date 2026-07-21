@@ -354,6 +354,7 @@ def cmd_upgrade(runner: Runner, cfg: Config) -> None:
             log.info("Upgrade cancelled.")
             return
 
+    ensure_operator_chart_version(runner, cfg)
     log.step(f"Step 3: Upgrading Materialize Operator to {cfg.operator_version}...")
     # Ensure a values file matching the *target* operator version. A custom or
     # prior file is respected; a missing one is fetched (and region-patched) so
@@ -460,6 +461,40 @@ def _ensure_metrics_server(runner: Runner) -> None:
                  "available.")
 
 
+def operator_chart_versions(runner: Runner) -> list[str]:
+    """Available materialize-operator chart versions, newest first."""
+    res = runner.run(
+        ["helm", "search", "repo", "materialize/materialize-operator",
+         "--versions", "-o", "json"],
+        check=False, capture=True,
+    )
+    if not res.ok:
+        return []
+    try:
+        return [e["version"] for e in json.loads(res.stdout) if e.get("version")]
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def ensure_operator_chart_version(runner: Runner, cfg: Config) -> None:
+    """Resolve cfg.operator_version to a chart version that actually exists.
+
+    The operator Helm chart is versioned independently of the environmentd
+    image, so an image version like v26.30.0 may have no matching chart (the
+    repo may only have v26.30.1). Use the exact version if present, otherwise
+    fall back to the latest available chart and warn.
+    """
+    versions = operator_chart_versions(runner)
+    if not versions or cfg.operator_version in versions:
+        return
+    latest = versions[0]
+    log.warn(f"Operator chart version '{cfg.operator_version}' not found in the "
+             f"materialize helm repo.")
+    log.warn(f"Using latest available operator chart: {latest} "
+             f"(pin with -o/--operator-version to override).")
+    cfg.operator_version = latest
+
+
 def _current_operator_version(runner: Runner, cfg: Config) -> str:
     res = runner.run(["helm", "list", "-n", cfg.namespace, "-o", "json"],
                      check=False, capture=True)
@@ -475,6 +510,7 @@ def _current_operator_version(runner: Runner, cfg: Config) -> str:
 
 
 def _install_or_skip_operator(runner: Runner, cfg: Config) -> None:
+    ensure_operator_chart_version(runner, cfg)
     if _current_operator_version(runner, cfg) == cfg.operator_version:
         log.info(f"Materialize Operator already at version {cfg.operator_version}. "
                  "Skipping.")
