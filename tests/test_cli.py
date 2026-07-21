@@ -155,3 +155,26 @@ def test_install_aborts_on_foreign_cluster_without_force():
     assert rc == 1
     # never got as far as touching helm repos / manifests
     assert not ran(r, "kubectl", "apply", "-f", "sample-postgres.yaml")
+
+
+def test_install_switches_kubectl_context_before_prerequisites():
+    # install on an existing cluster must point kubectl at that cluster before
+    # any kubectl call, else it talks to whatever context is active.
+    def responder(argv):
+        if argv[:2] == ["docker", "inspect"]:
+            return Result(0, json.dumps([{"Config": {"Labels": {"created-by": "x"}}}]), "")
+        return None
+
+    r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
+    # foreign cluster → aborts right after prereqs, before any downloads
+    main(["install", "-c", "mzk3-cluster"], runner=r)
+
+    def idx(pred):
+        return next((i for i, cl in enumerate(r.calls) if pred(cl)), None)
+
+    merge = idx(lambda c: c[:3] == ["k3d", "kubeconfig", "merge"]
+                and "mzk3-cluster" in c)
+    cluster_info = idx(lambda c: c[:2] == ["kubectl", "cluster-info"])
+    assert merge is not None, "context was never switched to the target cluster"
+    assert cluster_info is not None
+    assert merge < cluster_info

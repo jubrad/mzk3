@@ -122,6 +122,21 @@ def wait_for_node_ready(runner: Runner, retries: int = 30, delay: int = 5) -> No
     raise Abort
 
 
+def use_cluster_context(runner: Runner, cluster_name: str) -> None:
+    """Point kubectl at the given k3d cluster.
+
+    k3d only switches the kubeconfig context when it *creates* a cluster, so a
+    reused cluster (or any stale active context, e.g. a cloud cluster) would
+    otherwise leave kubectl talking to the wrong API server. Re-merge and
+    switch explicitly so all subsequent kubectl/helm calls target this cluster.
+    """
+    if runner.which("k3d") is None:
+        return
+    runner.run(["k3d", "kubeconfig", "merge", cluster_name,
+                "--kubeconfig-merge-default", "--kubeconfig-switch-context"],
+               check=False)
+
+
 def create_cluster(runner: Runner, cluster_name: str) -> None:
     """Create a labeled k3d cluster, idempotently."""
     require(runner, "k3d",
@@ -135,6 +150,7 @@ def create_cluster(runner: Runner, cluster_name: str) -> None:
         if is_mzk3_cluster(runner, cluster_name):
             log.info(f"Cluster '{cluster_name}' already exists and is an mzk3 "
                      "cluster. Using it.")
+            use_cluster_context(runner, cluster_name)
             return
         log.error(f"Cluster '{cluster_name}' already exists but was not created "
                   "by mzk3.")
@@ -144,6 +160,7 @@ def create_cluster(runner: Runner, cluster_name: str) -> None:
 
     log.step(f"Creating k3d cluster '{cluster_name}'...")
     runner.run(c.k3d_create(cluster_name))
+    use_cluster_context(runner, cluster_name)
     wait_for_node_ready(runner)
     log.info(f"Cluster '{cluster_name}' created successfully.")
     runner.run(["kubectl", "get", "nodes"], check=False)
@@ -245,6 +262,10 @@ def cmd_reset(runner: Runner, cfg: Config) -> None:
 def cmd_install(runner: Runner, cfg: Config) -> None:
     if cfg.create_cluster:
         create_cluster(runner, cfg.cluster_name)
+    else:
+        # Targeting an existing cluster via -c: make sure kubectl points at it
+        # rather than whatever context happens to be active.
+        use_cluster_context(runner, cfg.cluster_name)
 
     check_prerequisites(runner)
     verify_k3s_cluster(runner)
