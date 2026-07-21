@@ -312,7 +312,10 @@ def cmd_upgrade(runner: Runner, cfg: Config) -> None:
     log.info(f"Target Operator version: {cfg.operator_version}")
 
     log.step("Step 1: Updating Helm repository...")
-    runner.run(["helm", "repo", "update", "materialize"])
+    # add + update: `helm repo update <name>` fails if the repo was never added
+    # (e.g. upgrading from a fresh checkout), which would make the operator
+    # chart unresolvable.
+    helm_repo_setup(runner, "materialize", HELM_REPO)
 
     log.step("Step 2: Checking current deployment...")
     runner.run(["helm", "list", "-n", cfg.namespace], check=False)
@@ -331,17 +334,19 @@ def cmd_upgrade(runner: Runner, cfg: Config) -> None:
             return
 
     log.step(f"Step 3: Upgrading Materialize Operator to {cfg.operator_version}...")
-    if not Path(cfg.values_file).is_file():
-        log.warn(f"Values file not found: {cfg.values_file}. "
-                 "Upgrading without custom values.")
-        argv = c.operator_upgrade(cfg)
-        # drop the trailing `-f <file> --wait`, keep `--wait`
-        idx = argv.index("-f")
-        argv = argv[:idx] + ["--wait"]
-        runner.run(argv)
-    else:
+    # Ensure a values file matching the *target* operator version. A custom or
+    # prior file is respected; a missing one is fetched (and region-patched) so
+    # we never upgrade the operator with no values / stale keys.
+    if Path(cfg.values_file).is_file():
         log.info(f"Using values file: {cfg.values_file}")
-        runner.run(c.operator_upgrade(cfg))
+    else:
+        log.info(f"Values file {cfg.values_file} not found; downloading operator "
+                 f"values for {cfg.operator_version}...")
+        from . import patch
+        download(c.operator_values_url(cfg), cfg.values_file)
+        vf = Path(cfg.values_file)
+        vf.write_text(patch.patch_region(vf.read_text()))
+    runner.run(c.operator_upgrade(cfg))
 
     log.info("Waiting for operator to be ready...")
     runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",

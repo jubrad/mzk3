@@ -74,7 +74,9 @@ def operator_upgrade(cfg: Config) -> list[str]:
         "materialize/materialize-operator",
         "-n", cfg.namespace,
         "--version", cfg.operator_version,
+        "--set", "observability.enabled=true",
         "--set", "observability.podMetrics.enabled=true",
+        "--set", "observability.prometheus.scrapeAnnotations.enabled=true",
         "--set", "operator.cloudProvider.region=k3s",
     ]
     argv += ["-f", cfg.values_file, "--wait"]

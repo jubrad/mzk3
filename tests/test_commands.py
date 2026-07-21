@@ -64,6 +64,20 @@ def test_operator_upgrade_targets_operator_version_not_mz_version():
     assert argv[argv.index("--version") + 1] == "v26.5.0"
 
 
+def test_operator_upgrade_matches_install_observability_flags():
+    # upgrade must not silently drop observability config that install set
+    conf = cfg("upgrade", "-v", "v27.0.0")
+    up = c.operator_upgrade(conf)
+    inst = c.operator_install(conf)
+    for flag in ("observability.enabled=true",
+                 "observability.podMetrics.enabled=true",
+                 "observability.prometheus.scrapeAnnotations.enabled=true",
+                 "operator.cloudProvider.region=k3s"):
+        assert flag in up, flag
+        assert flag in inst, flag
+    assert "--wait" in up
+
+
 def test_download_url_for_operator_values_uses_operator_version():
     conf = cfg("install", "-v", "v27.0.0", "-o", "v26.5.0")
     url = c.operator_values_url(conf)

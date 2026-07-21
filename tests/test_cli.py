@@ -116,6 +116,34 @@ def test_reset_with_yes_deletes_then_recreates():
     assert delete_i < create_i
 
 
+def test_upgrade_updates_operator_before_instance(tmp_path, monkeypatch):
+    # a values file so upgrade doesn't try to download one
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sample-values-k3s.yaml").write_text('region: "k3s"\n')
+
+    def responder(argv):
+        if argv[:3] == ["kubectl", "get", "materialize"] and "metadata.name" in argv[-1]:
+            return Result(0, "myinst", "")
+        return None
+
+    r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
+    rc = main(["upgrade", "-v", "v27.0.0", "--yes"], runner=r)
+    assert rc == 0
+
+    def first_index(pred):
+        return next(i for i, cl in enumerate(r.calls) if pred(cl))
+
+    repo_add = first_index(lambda c: c[:4] == ["helm", "repo", "add", "materialize"])
+    op_upgrade = first_index(
+        lambda c: c[:2] == ["helm", "upgrade"] and "materialize/materialize-operator" in c
+    )
+    instance_patch = first_index(
+        lambda c: c[:3] == ["kubectl", "patch", "materialize"]
+    )
+    # repo ready, then operator upgraded, then the instance touched
+    assert repo_add < op_upgrade < instance_patch
+
+
 def test_install_aborts_on_foreign_cluster_without_force():
     def responder(argv):
         if argv[:2] == ["docker", "inspect"]:
