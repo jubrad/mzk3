@@ -19,6 +19,10 @@ HELM_REPO = "https://materializeinc.github.io/materialize"
 # subchart dependencies are vendored in the tag, so no registry access needed.
 MONITORING_VERSION = "v0.6.0"
 
+# Default size for Materialize's default (quickstart) compute cluster. 100cc is
+# 2 cores / 2 workers (vs the upstream 25cc = 0.5 core default).
+MZ_DEFAULT_CLUSTER_SIZE = "100cc"
+
 
 def monitoring_tarball_url(version: str = MONITORING_VERSION) -> str:
     return (
@@ -63,6 +67,7 @@ def operator_install(cfg: Config) -> list[str]:
         "--set", "observability.podMetrics.enabled=true",
         "--set", "observability.prometheus.scrapeAnnotations.enabled=true",
         "--set", "operator.cloudProvider.region=k3s",
+        "--set", f"operator.clusters.defaultSizes.default={MZ_DEFAULT_CLUSTER_SIZE}",
         "-f", cfg.values_file,
         "--wait",
     ]
@@ -78,6 +83,7 @@ def operator_upgrade(cfg: Config) -> list[str]:
         "--set", "observability.podMetrics.enabled=true",
         "--set", "observability.prometheus.scrapeAnnotations.enabled=true",
         "--set", "operator.cloudProvider.region=k3s",
+        "--set", f"operator.clusters.defaultSizes.default={MZ_DEFAULT_CLUSTER_SIZE}",
     ]
     argv += ["-f", cfg.values_file, "--wait"]
     return argv

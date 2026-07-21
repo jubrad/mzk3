@@ -47,10 +47,10 @@ spec:
         resources:
           requests:
             memory: "512Mi"
-            cpu: "250m"
+            cpu: "500m"
           limits:
             memory: "1Gi"
-            cpu: "500m"
+            cpu: "1"
         readinessProbe:
           tcpSocket:
             port: 9000
