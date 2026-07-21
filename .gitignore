@@ -3,9 +3,8 @@
 /sample-materialize.yaml
 /sample-postgres.yaml
 /rustfs.yaml
-/mz-prometheus-scrape.yml
-/monitoring-values.yaml
-/mz-dashboard.json
+/materialize-monitoring.tar.gz
+/materialize-monitoring-src/
 
 # Python
 __pycache__/

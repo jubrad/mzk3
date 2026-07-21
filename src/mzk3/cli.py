@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tarfile
 import time
 import urllib.request
 import uuid
@@ -540,50 +541,57 @@ def _uuidgen(runner: Runner) -> str:
 
 # --- monitoring ----------------------------------------------------------
 
+def _fetch_monitoring_charts(runner: Runner) -> Path:
+    """Download and extract the upstream monitoring chart tag; return its
+    `charts/` directory."""
+    src = Path("materialize-monitoring-src")
+    if runner.dry_run:
+        return src / "charts"
+
+    tarball = "materialize-monitoring.tar.gz"
+    log.info(f"Downloading materialize-monitoring {c.MONITORING_VERSION}...")
+    download(c.monitoring_tarball_url(), tarball)
+    src.mkdir(exist_ok=True)
+    with tarfile.open(tarball) as tf:
+        tf.extractall(src, filter="data")
+    # The tarball extracts to a single top-level directory.
+    root = next(p for p in src.iterdir() if p.is_dir())
+    return root / "charts"
+
+
 def install_monitoring(runner: Runner) -> None:
-    log.step("Installing Prometheus & Grafana monitoring stack...")
-    helm_repo_setup(runner, "prometheus-community",
-                    "https://prometheus-community.github.io/helm-charts")
+    log.step("Installing upstream Materialize monitoring stack "
+             "(materialize-monitoring)...")
     ensure_namespace(runner, "monitoring")
 
-    log.info("Downloading Materialize Prometheus configuration...")
-    download(
-        "https://raw.githubusercontent.com/MaterializeInc/materialize/main/"
-        "doc/user/data/self_managed/monitoring/prometheus.yml",
-        "mz-prometheus-scrape.yml",
-    )
+    charts = _fetch_monitoring_charts(runner)
 
-    data = resources.files("mzk3.data")
-    Path("mz-dashboard.json").write_text(
-        (data / "mz-dashboard.json").read_text())
-    Path("monitoring-values.yaml").write_text(
-        (data / "monitoring-values.yaml").read_text())
-
-    log.info("Installing kube-prometheus-stack...")
+    # CRDs first (grafana-operator / prometheus-operator CRDs).
+    log.info("Installing monitoring CRDs...")
     runner.run([
-        "helm", "upgrade", "--install", "prometheus",
-        "prometheus-community/kube-prometheus-stack",
-        "--namespace", "monitoring", "-f", "monitoring-values.yaml",
-        "--set", "prometheus.prometheusSpec.scrapeInterval=30s",
-        "--wait", "--timeout", "10m",
+        "helm", "upgrade", "--install", "materialize-monitoring-crds",
+        str(charts / "materialize-monitoring-crds"),
+        "--namespace", "monitoring", "--wait", "--timeout", "5m",
     ])
 
-    log.info("Provisioning Materialize dashboard...")
-    created = runner.run(
-        ["kubectl", "create", "configmap", "mz-dashboard",
-         "--from-file=mz-dashboard.json", "--namespace", "monitoring",
-         "--dry-run=client", "-o", "yaml"],
-        capture=True,
-    )
-    runner.run(["kubectl", "apply", "-f", "-"], text_input=created.stdout)
-    runner.run(["kubectl", "label", "configmap", "mz-dashboard",
-                "grafana_dashboard=1", "--namespace", "monitoring", "--overwrite"])
+    # Umbrella stack. Disable Loki/Thanos (their `.enabled` conditions override
+    # the group tags), so no object storage is needed — suitable for local k3d.
+    log.info("Installing materialize-monitoring stack "
+             "(this may take several minutes)...")
+    runner.run([
+        "helm", "upgrade", "--install", "mz-monitoring",
+        str(charts / "materialize-monitoring"),
+        "--namespace", "monitoring",
+        "--set", "thanos.enabled=false",
+        "--set", "loki.enabled=false",
+        # Install grafana-operator CRDs from the chart's crds/ dir (applied
+        # before templates) so the Grafana CRs in this same release can be
+        # mapped on a fresh cluster. With the chart default (false) the CRDs
+        # land in templates/ and a first-time install fails.
+        "--set", "grafana-operator.crds.immutable=true",
+        "--wait", "--timeout", "15m",
+    ])
 
-    log.info("Restarting Grafana to load dashboards...")
-    runner.run(["kubectl", "rollout", "restart", "deployment", "prometheus-grafana",
-                "-n", "monitoring"])
-    runner.run(["kubectl", "rollout", "status", "deployment", "prometheus-grafana",
-                "-n", "monitoring", "--timeout=120s"], check=False)
     log.info("Monitoring stack installed successfully.")
 
 
@@ -600,6 +608,11 @@ def _print_success_install(cfg: Config) -> None:
     log.info(f"  MZ_CONSOLE=$(kubectl -n {cfg.instance_ns} get svc -o name | "
              "grep console)")
     log.info(f"  kubectl port-forward $MZ_CONSOLE 8080:8080 -n {cfg.instance_ns}")
+    if cfg.install_dashboards:
+        log.info("Access Grafana (materialize-monitoring):")
+        log.info("  GRAFANA=$(kubectl -n monitoring get svc -o name | grep grafana | "
+                 "head -1)")
+        log.info("  kubectl port-forward -n monitoring $GRAFANA 3000:80")
 
 
 # --- dispatch ------------------------------------------------------------

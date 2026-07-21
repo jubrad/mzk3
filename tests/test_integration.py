@@ -40,7 +40,8 @@ def installed(tmp_path_factory):
     subprocess.run(["k3d", "cluster", "delete", CLUSTER],
                    capture_output=True, check=False)
     try:
-        rc = main(["install", "--create-cluster", "-c", CLUSTER])
+        rc = main(["install", "--create-cluster", "-c", CLUSTER,
+                   "--install-dashboards"])
         yield rc
     finally:
         os.chdir(prev)
@@ -101,6 +102,16 @@ def test_persist_objects_written_to_rustfs(installed):
     count = next((int(line.split("=")[1]) for line in logs.splitlines()
                   if line.startswith("COUNT=")), 0)
     assert count > 0, f"no persist objects found in rustfs bucket; logs:\n{logs}"
+
+
+def test_monitoring_grafana_becomes_ready(installed):
+    """The upstream materialize-monitoring stack installs and Grafana is up."""
+    releases = subprocess.run(["helm", "list", "-n", "monitoring", "-q"],
+                              capture_output=True, text=True).stdout
+    assert "mz-monitoring" in releases
+    res = _kubectl("wait", "--for=condition=Ready", "--timeout=240s",
+                   "pod", "-l", "app.kubernetes.io/name=grafana", "-n", "monitoring")
+    assert res.returncode == 0, res.stderr
 
 
 def test_status_command_runs_against_live_cluster(installed):

@@ -78,6 +78,16 @@ def test_download_url_for_materialize_uses_mz_version():
     assert url.endswith("misc/helm-charts/testing/materialize.yaml")
 
 
+def test_monitoring_tarball_url_points_at_the_release_tag():
+    url = c.monitoring_tarball_url("v0.6.0")
+    assert url.startswith("https://codeload.github.com/MaterializeInc/materialize-monitoring/")
+    assert url.endswith("refs/tags/materialize-monitoring/v0.6.0")
+
+
+def test_monitoring_tarball_url_defaults_to_pinned_version():
+    assert c.MONITORING_VERSION in c.monitoring_tarball_url()
+
+
 def test_environmentd_pods_selector_matches_the_operator_labels():
     # environmentd runs as a StatefulSet; its pods carry materialize.cloud/app,
     # NOT app.kubernetes.io/component. (The old deployment selector matched

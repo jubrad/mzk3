@@ -179,7 +179,7 @@ mzk3 list-versions
 | `-r, --release-name` | `MZ_RELEASE_NAME` | `my-materialize-operator` | Helm release name |
 | `-l, --license-key` | `MZ_LICENSE_KEY` | - | Path to license key file |
 | `-c, --cluster` | `K3D_CLUSTER_NAME` | `mzk3-cluster` | k3d cluster name |
-| `--install-dashboards` | `MZ_INSTALL_DASHBOARDS` | `false` | Install Prometheus/Grafana stack |
+| `--install-dashboards` | `MZ_INSTALL_DASHBOARDS` | `false` | Install upstream materialize-monitoring stack |
 | `--create-cluster` | - | `false` | Create k3d cluster before install |
 | `--force` | - | `false` | Force operation (upgrade: forceRollout; install: bypass cluster check) |
 | `-y, --yes` | - | `false` | Skip confirmation prompts |
@@ -219,52 +219,27 @@ From within the cluster, connect to:
 
 ## Monitoring
 
-When installed with `--install-dashboards`, mzk3 deploys:
-- **Prometheus** - Metrics collection and storage
-- **Grafana** - Visualization dashboards
+When installed with `--install-dashboards`, mzk3 deploys the upstream
+[materialize-monitoring](https://github.com/MaterializeInc/materialize-monitoring)
+stack (Alloy + Grafana + dashboards, with kube-state-metrics / metrics-server /
+alertmanager) into the `monitoring` namespace. Loki and Thanos are left disabled
+by default, so no object storage is required for local k3d.
+
+Because that chart is not published to a Helm repository yet, mzk3 installs it
+from the pinned release tag (`materialize-monitoring/v0.6.0`) — it downloads the
+tag tarball (subchart dependencies are vendored in it) and runs `helm install`
+against the CRDs chart and then the umbrella chart. Bump `MONITORING_VERSION`
+in `src/mzk3/commands.py` to track a newer release.
 
 ### Accessing Grafana
 
 ```bash
-kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+GRAFANA=$(kubectl -n monitoring get svc -o name | grep grafana | head -1)
+kubectl port-forward -n monitoring $GRAFANA 3000:80
 ```
 
-Open http://localhost:3000 (login: `admin` / `admin`)
-
-Navigate to **Dashboards > Materialize Overview** for:
-- CPU and Memory usage by pod
-- Wallclock lag (freshness) metrics
-- Active sessions and subscribes
-- Arrangement size and record counts
-- Pod restarts and OOM kills
-
-### Accessing Prometheus
-
-```bash
-kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
-```
-
-Open http://localhost:9090
-
-### Key Metrics
-
-| Metric | Description |
-|--------|-------------|
-| `mz_dataflow_wallclock_lag_seconds` | How far behind real-time a dataflow is |
-| `mz_arrangement_size_bytes` | Memory used by arrangements |
-| `mz_arrangement_record_count` | Number of records in arrangements |
-| `mz_active_sessions` | Current active database sessions |
-| `mz_active_subscribes` | Current active SUBSCRIBE queries |
-| `kube_pod_container_status_restarts_total` | Container restart count (indicates crashes/OOMs) |
-| `kube_pod_container_status_last_terminated_reason` | Why container was terminated (OOMKilled, Error, etc.) |
-
-### Monitoring Limitations on macOS/k3d
-
-Some metrics are not available when running k3d on macOS:
-- `container_spec_memory_limit_bytes` - cAdvisor metrics require native Linux
-- `container_spec_memory_swap_limit_bytes` - Same limitation
-
-These metrics work correctly on native Linux Kubernetes deployments.
+Then open http://localhost:3000 and look for the **Materialize Overview**
+dashboard. See the upstream repository for dashboard details and configuration.
 
 ## Architecture
 

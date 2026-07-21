@@ -14,6 +14,18 @@ _RAW = "https://raw.githubusercontent.com/MaterializeInc/materialize"
 
 HELM_REPO = "https://materializeinc.github.io/materialize"
 
+# Upstream monitoring stack (github.com/MaterializeInc/materialize-monitoring).
+# Not published to a helm repo yet, so we install from the release tag tarball;
+# subchart dependencies are vendored in the tag, so no registry access needed.
+MONITORING_VERSION = "v0.6.0"
+
+
+def monitoring_tarball_url(version: str = MONITORING_VERSION) -> str:
+    return (
+        "https://codeload.github.com/MaterializeInc/materialize-monitoring/"
+        f"tar.gz/refs/tags/materialize-monitoring/{version}"
+    )
+
 
 # --- download URLs -------------------------------------------------------
 
