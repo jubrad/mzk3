@@ -9,6 +9,7 @@ import tarfile
 import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import commands as c
@@ -36,6 +37,29 @@ def download(url: str, dest: str) -> None:
         log.error(f"Failed to download: {url}")
         raise Abort
     Path(dest).write_bytes(body)
+
+
+def _parallel(*thunks) -> None:
+    """Run independent install steps concurrently. Each thunk is a no-arg
+    callable; blocking subprocess calls release the GIL so they truly overlap.
+    Re-raises the first exception once all have finished.
+    """
+    thunks = [t for t in thunks if t is not None]
+    if len(thunks) == 1:
+        thunks[0]()
+        return
+    with ThreadPoolExecutor(max_workers=len(thunks)) as ex:
+        futures = [ex.submit(t) for t in thunks]
+    for f in futures:  # after the pool drains; surfaces the first error
+        f.result()
+
+
+def _wait_backends_ready(runner: Runner) -> None:
+    log.info("Waiting for backends (postgres + rustfs) to be ready...")
+    runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
+                "deployment/postgres", "-n", "materialize"], check=False)
+    runner.run(["kubectl", "wait", "--for=jsonpath={.status.currentState}=Ready",
+                "tenant/rustfs", "-n", "materialize", "--timeout=300s"], check=False)
 
 
 def require(runner: Runner, binary: str, hint: str) -> None:
@@ -304,25 +328,29 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
 
     install_rustfs_operator(runner)
 
-    log.step("Deploying PostgreSQL backend...")
+    log.step("Deploying PostgreSQL and RustFS backends...")
     apply_manifest(runner, "sample-postgres.yaml")
     _deploy_rustfs(runner, cfg)
 
-    _ensure_metrics_server(runner)
+    # These three are independent: the operator chart doesn't need the backends,
+    # metrics-server is standalone, and the backends just need time to come up.
+    log.step("Installing operator + metrics-server while backends start "
+             "(in parallel)...")
+    _parallel(
+        lambda: _install_or_skip_operator(runner, cfg),
+        lambda: _ensure_metrics_server(runner),
+        lambda: _wait_backends_ready(runner),
+    )
 
-    log.step("Waiting for backends to be ready...")
-    runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
-                "deployment/postgres", "-n", "materialize"], check=False)
-    log.info("Waiting for RustFS tenant to be ready (buckets auto-created)...")
-    runner.run(["kubectl", "wait",
-                "--for=jsonpath={.status.currentState}=Ready",
-                "tenant/rustfs", "-n", "materialize", "--timeout=300s"], check=False)
-
-    _install_or_skip_operator(runner, cfg)
-    _deploy_or_skip_instance(runner, cfg)
-
+    # The instance needs the operator + backends (now ready); the monitoring
+    # stack is independent of the instance, so bring them up together. Pre-create
+    # the instance namespace so monitoring's PodMonitor has somewhere to land.
+    ensure_namespace(runner, cfg.instance_ns)
+    tasks = [lambda: _deploy_or_skip_instance(runner, cfg)]
     if cfg.install_dashboards:
-        install_monitoring(runner, cfg)
+        log.step("Deploying Materialize instance and monitoring (in parallel)...")
+        tasks.append(lambda: install_monitoring(runner, cfg))
+    _parallel(*tasks)
 
     _print_success_install(cfg)
 
