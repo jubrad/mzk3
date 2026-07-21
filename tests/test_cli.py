@@ -7,6 +7,8 @@ via `responder`, so we assert on the *sequence* of commands each flow issues.
 import json
 
 from mzk3.cli import (
+    _materialize_podmonitor,
+    _mz_metrics_path,
     ensure_operator_chart_version,
     is_mzk3_cluster,
     list_mzk3_clusters,
@@ -193,6 +195,24 @@ def test_operator_chart_version_untouched_if_repo_unavailable():
     r = Runner(dry_run=True, binaries=ALL_BINS)  # no responder -> empty search
     ensure_operator_chart_version(r, cfg)
     assert cfg.operator_version == "v26.30.0"  # no data, don't guess
+
+
+def test_mz_metrics_path_gated_on_version():
+    assert _mz_metrics_path("v26.25.0") == "/metrics/public"
+    assert _mz_metrics_path("v26.30.0") == "/metrics/public"
+    assert _mz_metrics_path("v26.24.3") == "/metrics"  # pre-26.25
+    assert _mz_metrics_path("v26.4.0") == "/metrics"
+    assert _mz_metrics_path("weird") == "/metrics/public"  # default when unparseable
+
+
+def test_materialize_podmonitor_targets_the_instance_namespace():
+    pm = _materialize_podmonitor("materialize-environment", "/metrics/public")
+    assert "kind: PodMonitor" in pm
+    assert "namespace: materialize-environment" in pm
+    assert "matchNames: [materialize-environment]" in pm
+    assert "materialize.cloud/app" in pm
+    assert "path: /metrics/public" in pm
+    assert "targetPort: 6878" in pm
 
 
 def test_install_switches_kubectl_context_before_prerequisites():

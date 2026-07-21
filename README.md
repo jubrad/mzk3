@@ -221,15 +221,32 @@ From within the cluster, connect to:
 
 When installed with `--install-dashboards`, mzk3 deploys the upstream
 [materialize-monitoring](https://github.com/MaterializeInc/materialize-monitoring)
-stack (Alloy + Grafana + dashboards, with kube-state-metrics / metrics-server /
-alertmanager) into the `monitoring` namespace. Loki and Thanos are left disabled
-by default, so no object storage is required for local k3d.
+stack (Alloy + Grafana + dashboards + Thanos, with kube-state-metrics /
+alertmanager) into the `monitoring` namespace.
 
 Because that chart is not published to a Helm repository yet, mzk3 installs it
 from the pinned release tag (`materialize-monitoring/v0.6.0`) — it downloads the
 tag tarball (subchart dependencies are vendored in it) and runs `helm install`
 against the CRDs chart and then the umbrella chart. Bump `MONITORING_VERSION`
 in `src/mzk3/commands.py` to track a newer release.
+
+The metrics pipeline is: Alloy scrapes → alloy-gateway remote-writes → **Thanos
+receive** → **Thanos query** → Grafana. mzk3 wires up several things the v0.6.0
+chart leaves incomplete for a self-contained local install:
+
+- **Thanos object storage → RustFS.** Thanos is enabled with its object store
+  pointed at the in-cluster RustFS (S3), using a dedicated `thanos` bucket — so
+  no external/cloud object storage is needed. (Thanos store-gateway and
+  compactor are left off; receive + query cover recent data.)
+- **Grafana datasource.** The chart ships none; mzk3 creates a `GrafanaDatasource`
+  pointing at `thanos-query` (the dashboards' `metricsDatasource` variable
+  resolves to it).
+- **Materialize scrape target.** The chart doesn't scrape Materialize; mzk3
+  creates a `PodMonitor` for environmentd (`/metrics/public`, or `/metrics` for
+  versions before v26.25).
+- **Grafana auth fix.** Works around a chart bug where the bundled Grafana CR
+  references an admin-credentials secret the chart never creates and a wrong
+  service URL, so grafana-operator can authenticate and sync dashboards.
 
 ### Accessing Grafana
 
@@ -240,17 +257,13 @@ kubectl port-forward -n monitoring $GRAFANA 3000:80
 kubectl get secret mz-monitoring-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d; echo
 ```
 
-Then open http://localhost:3000 (user `admin`).
+Then open http://localhost:3000 (user `admin`) and find the **Materialize
+Overview** (env-top) dashboard, backed by the `Thanos` datasource.
 
-> **Known limitation (upstream, v0.6.0):** the bundled dashboards ship as
-> Grafana 13 app-platform (`dashboard.grafana.app/v2`) resources delivered via
-> grafana-operator `GrafanaManifest`. mzk3 works around a chart bug so the
-> operator can authenticate to the bundled Grafana (the chart otherwise
-> references an admin-credentials secret it never creates and a wrong service
-> URL), and the manifest reports as applied — but the v2 dashboards do not yet
-> render in Grafana in this stack (alpha app-platform behavior). Prometheus/
-> Alloy metrics collection works; dashboard rendering is expected to improve as
-> the upstream chart matures. Track upstream materialize-monitoring for status.
+Notes:
+- Dashboards require Materialize **v26.25+** for the `/metrics/public` endpoint
+  (older versions are scraped at `/metrics`) and target Materialize v26.24+.
+- Only `env-*` dashboards ship in v0.6.0 (`dashboards.selected`).
 
 ## Architecture
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tarfile
 import time
@@ -320,7 +321,7 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
     _deploy_or_skip_instance(runner, cfg)
 
     if cfg.install_dashboards:
-        install_monitoring(runner)
+        install_monitoring(runner, cfg)
 
     _print_success_install(cfg)
 
@@ -621,7 +622,108 @@ def _fetch_monitoring_charts(runner: Runner) -> Path:
     return root / "charts"
 
 
-def install_monitoring(runner: Runner) -> None:
+# Values overlay for the umbrella chart. Enables Thanos as the metrics store,
+# backed by the in-cluster RustFS S3 (a `thanos` bucket) so no external object
+# storage is needed on local k3d. Store-gateway/compactor are left off (they
+# only add value with long-term object storage); receive+query cover recent
+# data. Also carries the grafana-operator CRD + bundled-Grafana auth fixes.
+_MONITORING_OVERLAY = """\
+loki:
+  enabled: false
+grafana-operator:
+  crds:
+    immutable: true
+connections:
+  grafana:
+    external:
+      url: http://mz-monitoring-grafana.monitoring.svc.cluster.local:80
+      adminUser:
+        name: mz-monitoring-grafana
+        key: admin-user
+      adminPassword:
+        name: mz-monitoring-grafana
+        key: admin-password
+thanos:
+  enabled: true
+  storegateway:
+    enabled: false
+  compactor:
+    enabled: false
+  queryFrontend:
+    enabled: false
+  ruler:
+    enabled: false
+  global:
+    objstore:
+      createSecret: true
+      secretName: thanos-objstore-config
+      secretKey: objstore.yml
+      config: |
+        type: S3
+        config:
+          bucket: thanos
+          endpoint: rustfs.materialize.svc.cluster.local:9000
+          access_key: minio
+          secret_key: minio123
+          insecure: true
+"""
+
+# The chart ships no Grafana datasource and its dashboards use a
+# `metricsDatasource` Prometheus variable that defaults to the default
+# datasource — so provide one pointing at thanos-query.
+_GRAFANA_DATASOURCE = """\
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: mzmon-thanos
+  namespace: monitoring
+spec:
+  allowCrossNamespaceImport: false
+  instanceSelector:
+    matchLabels: {}
+  datasource:
+    name: Thanos
+    type: prometheus
+    access: proxy
+    url: http://thanos-query.monitoring.svc.cluster.local:9090
+    isDefault: true
+    jsonData:
+      timeInterval: "30s"
+"""
+
+
+def _mz_metrics_path(version: str) -> str:
+    """environmentd metrics endpoint. `/metrics/public` exists from v26.25;
+    older releases only expose `/metrics`."""
+    m = re.match(r"v?(\d+)\.(\d+)", version)
+    if m and (int(m.group(1)), int(m.group(2))) < (26, 25):
+        return "/metrics"
+    return "/metrics/public"
+
+
+def _materialize_podmonitor(instance_ns: str, metrics_path: str) -> str:
+    return f"""\
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: materialize
+  namespace: {instance_ns}
+  labels:
+    app.kubernetes.io/part-of: materialize
+spec:
+  namespaceSelector:
+    matchNames: [{instance_ns}]
+  selector:
+    matchExpressions:
+      - {{key: materialize.cloud/app, operator: Exists}}
+  podMetricsEndpoints:
+    - targetPort: 6878
+      path: {metrics_path}
+      interval: 30s
+"""
+
+
+def install_monitoring(runner: Runner, cfg: Config) -> None:
     log.step("Installing upstream Materialize monitoring stack "
              "(materialize-monitoring)...")
     ensure_namespace(runner, "monitoring")
@@ -636,34 +738,24 @@ def install_monitoring(runner: Runner) -> None:
         "--namespace", "monitoring", "--wait", "--timeout", "5m",
     ])
 
-    # Umbrella stack. Disable Loki/Thanos (their `.enabled` conditions override
-    # the group tags), so no object storage is needed — suitable for local k3d.
+    Path("monitoring-values.yaml").write_text(_MONITORING_OVERLAY)
     log.info("Installing materialize-monitoring stack "
-             "(this may take several minutes)...")
+             "(Thanos on RustFS; this may take several minutes)...")
     runner.run([
         "helm", "upgrade", "--install", "mz-monitoring",
         str(charts / "materialize-monitoring"),
         "--namespace", "monitoring",
-        "--set", "thanos.enabled=false",
-        "--set", "loki.enabled=false",
-        # Install grafana-operator CRDs from the chart's crds/ dir (applied
-        # before templates) so the Grafana CRs in this same release can be
-        # mapped on a fresh cluster. With the chart default (false) the CRDs
-        # land in templates/ and a first-time install fails.
-        "--set", "grafana-operator.crds.immutable=true",
-        # v0.6.0 bug: in bundled mode the Grafana CR points at a creds secret
-        # the chart never creates (`<fullname>-grafana-admin-credentials`) and
-        # a URL using the wrong (fullname-based) host, so grafana-operator
-        # can't authenticate to the bundled Grafana. Point it at the real
-        # subchart service + admin secret.
-        "--set", "connections.grafana.external.url="
-                 "http://mz-monitoring-grafana.monitoring.svc.cluster.local:80",
-        "--set", "connections.grafana.external.adminUser.name=mz-monitoring-grafana",
-        "--set", "connections.grafana.external.adminUser.key=admin-user",
-        "--set", "connections.grafana.external.adminPassword.name=mz-monitoring-grafana",
-        "--set", "connections.grafana.external.adminPassword.key=admin-password",
+        "-f", "monitoring-values.yaml",
         "--wait", "--timeout", "15m",
     ])
+
+    # The chart delivers no Grafana datasource and never scrapes Materialize
+    # (v0.6.0 leaves both unimplemented), so provide them ourselves.
+    log.info("Provisioning Thanos datasource and Materialize scrape target...")
+    runner.run(["kubectl", "apply", "-f", "-"], text_input=_GRAFANA_DATASOURCE)
+    runner.run(["kubectl", "apply", "-f", "-"],
+               text_input=_materialize_podmonitor(cfg.instance_ns,
+                                                  _mz_metrics_path(cfg.version)))
 
     log.info("Monitoring stack installed successfully.")
 

@@ -105,4 +105,5 @@ spec:
           done
           mc mb -p rfs/bucket
           mc mb -p rfs/persist
+          mc mb -p rfs/thanos
           echo "buckets ready"

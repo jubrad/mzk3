@@ -3,6 +3,7 @@
 /sample-materialize.yaml
 /sample-postgres.yaml
 /rustfs.yaml
+/monitoring-values.yaml
 /materialize-monitoring.tar.gz
 /materialize-monitoring-src/
 
