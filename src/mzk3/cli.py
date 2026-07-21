@@ -426,6 +426,9 @@ def _patch_configs(runner: Runner, cfg: Config) -> None:
     mz = Path("sample-materialize.yaml")
     mz.write_text(patch.patch_environmentd_image(mz.read_text(), cfg.version))
 
+    log.info("Setting environmentd resources to 2 CPU...")
+    mz.write_text(patch.patch_environmentd_resources(mz.read_text(), "2"))
+
     # The upstream Materialize CR ships pointing at a `minio` service; repoint
     # persist at our RustFS service.
     log.info("Repointing persist backend endpoint to RustFS...")

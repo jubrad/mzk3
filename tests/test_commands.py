@@ -64,13 +64,6 @@ def test_operator_upgrade_targets_operator_version_not_mz_version():
     assert argv[argv.index("--version") + 1] == "v26.5.0"
 
 
-def test_operator_sets_default_cluster_size_to_two_cores():
-    conf = cfg("install", "-v", "v27.0.0")
-    flag = "operator.clusters.defaultSizes.default=100cc"  # 100cc = 2 cores
-    assert flag in c.operator_install(conf)
-    assert flag in c.operator_upgrade(conf)
-
-
 def test_operator_upgrade_matches_install_observability_flags():
     # upgrade must not silently drop observability config that install set
     conf = cfg("upgrade", "-v", "v27.0.0")

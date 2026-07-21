@@ -2,6 +2,7 @@
 
 from mzk3.patch import (
     patch_environmentd_image,
+    patch_environmentd_resources,
     patch_license_key,
     patch_persist_backend_host,
     patch_region,
@@ -65,3 +66,34 @@ def test_patch_persist_backend_host_swaps_only_the_fqdn():
 
 def test_patch_persist_backend_host_noop_for_minio():
     assert patch_persist_backend_host(_SECRET, "minio", "minio") == _SECRET
+
+
+_CR = """\
+apiVersion: materialize.cloud/v1alpha1
+kind: Materialize
+metadata:
+  name: 12345678
+spec:
+  environmentdImageRef: materialize/environmentd:v26.30.0
+  backendSecretName: materialize-backend
+  authenticatorKind: None
+"""
+
+
+def test_patch_environmentd_resources_sets_cpu_under_spec():
+    out = patch_environmentd_resources(_CR, "2")
+    assert "environmentdResourceRequirements:" in out
+    # cpu requests and limits both set to the requested value
+    assert out.count('cpu: "2"') == 2
+    # inserted at spec level (2-space indent), nested keys deeper
+    assert "\n  environmentdResourceRequirements:\n" in out
+    assert "    requests:\n" in out and "    limits:\n" in out
+    assert "      cpu: \"2\"" in out
+    # untouched fields remain
+    assert "backendSecretName: materialize-backend" in out
+
+
+def test_patch_environmentd_resources_idempotent():
+    once = patch_environmentd_resources(_CR, "2")
+    twice = patch_environmentd_resources(once, "2")
+    assert once == twice
