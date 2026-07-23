@@ -798,16 +798,38 @@ spec:
 """
 
 
-def _mz_metrics_path(version: str) -> str:
-    """environmentd metrics endpoint. `/metrics/public` exists from v26.25;
-    older releases only expose `/metrics`."""
+def _mz_base_metrics_path(version: str) -> str:
+    """environmentd's general metrics endpoint. `/metrics/public` exists from
+    v26.25; older releases only expose `/metrics`."""
     m = re.match(r"v?(\d+)\.(\d+)", version)
     if m and (int(m.group(1)), int(m.group(2))) < (26, 25):
         return "/metrics"
     return "/metrics/public"
 
 
-def _materialize_podmonitor(instance_ns: str, metrics_path: str) -> str:
+# environmentd exposes several metric families on separate paths (declared via
+# materialize.prometheus.io/* pod annotations). The dashboards' variables depend
+# on compute metrics (mz_compute_*), so scrape them all — not just the base set.
+_MZ_METRIC_PATHS = ["/metrics/mz_compute", "/metrics/mz_frontier",
+                    "/metrics/mz_storage", "/metrics/mz_usage"]
+
+
+def _materialize_podmonitor(instance_ns: str, base_path: str) -> str:
+    # Relabel the operator's pod labels into metric labels the dashboards
+    # select on (e.g. the `metricsNamespace` variable is
+    # label_values(mz_compute_commands_total, materialize_cloud_organization_namespace)).
+    relabel = (
+        "      relabelings:\n"
+        "        - sourceLabels: "
+        "[__meta_kubernetes_pod_label_materialize_cloud_organization_namespace]\n"
+        "          targetLabel: materialize_cloud_organization_namespace\n"
+        "        - sourceLabels: "
+        "[__meta_kubernetes_pod_label_materialize_cloud_organization_name]\n"
+        "          targetLabel: materialize_cloud_organization_name")
+    endpoints = "".join(
+        f"    - targetPort: 6878\n      path: {p}\n      interval: 30s\n{relabel}\n"
+        for p in [base_path, *_MZ_METRIC_PATHS]
+    )
     return f"""\
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -820,13 +842,10 @@ spec:
   namespaceSelector:
     matchNames: [{instance_ns}]
   selector:
-    matchExpressions:
-      - {{key: materialize.cloud/app, operator: Exists}}
+    matchLabels:
+      materialize.cloud/app: environmentd
   podMetricsEndpoints:
-    - targetPort: 6878
-      path: {metrics_path}
-      interval: 30s
-"""
+{endpoints}"""
 
 
 def _kubelet_cadvisor_manifests(node_ips: list[str]) -> str:
@@ -961,7 +980,7 @@ def install_monitoring(runner: Runner, cfg: Config) -> None:
     runner.run(["kubectl", "apply", "-f", "-"], text_input=_GRAFANA_DATASOURCE)
     runner.run(["kubectl", "apply", "-f", "-"],
                text_input=_materialize_podmonitor(cfg.instance_ns,
-                                                  _mz_metrics_path(cfg.version)))
+                                                  _mz_base_metrics_path(cfg.version)))
 
     # Container CPU/memory metrics from each node's kubelet (the chart doesn't
     # scrape the kubelet).

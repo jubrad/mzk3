@@ -9,7 +9,7 @@ import json
 from mzk3.cli import (
     _kubelet_cadvisor_manifests,
     _materialize_podmonitor,
-    _mz_metrics_path,
+    _mz_base_metrics_path,
     _rustfs_tenant,
     ensure_operator_chart_version,
     is_mzk3_cluster,
@@ -224,12 +224,12 @@ def test_rustfs_tenant_honours_config_resources(tmp_path):
     assert 'cpu: "4"' in t and 'memory: "8Gi"' in t
 
 
-def test_mz_metrics_path_gated_on_version():
-    assert _mz_metrics_path("v26.25.0") == "/metrics/public"
-    assert _mz_metrics_path("v26.30.0") == "/metrics/public"
-    assert _mz_metrics_path("v26.24.3") == "/metrics"  # pre-26.25
-    assert _mz_metrics_path("v26.4.0") == "/metrics"
-    assert _mz_metrics_path("weird") == "/metrics/public"  # default when unparseable
+def test_mz_base_metrics_path_gated_on_version():
+    assert _mz_base_metrics_path("v26.25.0") == "/metrics/public"
+    assert _mz_base_metrics_path("v26.30.0") == "/metrics/public"
+    assert _mz_base_metrics_path("v26.24.3") == "/metrics"  # pre-26.25
+    assert _mz_base_metrics_path("v26.4.0") == "/metrics"
+    assert _mz_base_metrics_path("weird") == "/metrics/public"  # default
 
 
 def test_kubelet_cadvisor_manifests_include_node_ips_and_scrape_config():
@@ -244,14 +244,18 @@ def test_kubelet_cadvisor_manifests_include_node_ips_and_scrape_config():
     assert "nodes/metrics" in m
 
 
-def test_materialize_podmonitor_targets_the_instance_namespace():
+def test_materialize_podmonitor_scrapes_all_paths_and_relabels_org():
     pm = _materialize_podmonitor("materialize-environment", "/metrics/public")
     assert "kind: PodMonitor" in pm
     assert "namespace: materialize-environment" in pm
-    assert "matchNames: [materialize-environment]" in pm
-    assert "materialize.cloud/app" in pm
-    assert "path: /metrics/public" in pm
-    assert "targetPort: 6878" in pm
+    assert "materialize.cloud/app: environmentd" in pm
+    # base path + the compute/frontier/storage/usage families
+    for p in ("/metrics/public", "/metrics/mz_compute", "/metrics/mz_frontier",
+              "/metrics/mz_storage", "/metrics/mz_usage"):
+        assert f"path: {p}" in pm
+    # org labels relabeled onto metrics (drives the dashboards' namespace var)
+    assert "targetLabel: materialize_cloud_organization_namespace" in pm
+    assert "targetLabel: materialize_cloud_organization_name" in pm
 
 
 def test_install_switches_kubectl_context_before_prerequisites():

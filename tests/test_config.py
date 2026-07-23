@@ -106,14 +106,14 @@ def test_config_resources_merge_over_defaults(tmp_path):
     conf = _write(tmp_path, {"resources": {"rustfs": {"cpu": "4"}}})
     _, cfg = resolve(["install", "--config", conf])
     assert cfg.resources["rustfs"]["cpu"] == "4"
-    assert cfg.resources["rustfs"]["memory"] == "1Gi"     # default kept
+    assert cfg.resources["rustfs"]["memory"] == "4Gi"     # default kept
     assert cfg.resources["environmentd"]["cpu"] == "2"     # default kept
 
 
 def test_resources_default_when_no_config():
     _, cfg = resolve(["install"])
     assert cfg.resources["environmentd"] == {"cpu": "2", "memory": "4Gi"}
-    assert cfg.resources["rustfs"] == {"cpu": "1", "memory": "1Gi"}
+    assert cfg.resources["rustfs"] == {"cpu": "1", "memory": "4Gi"}
 
 
 def test_long_flags():
