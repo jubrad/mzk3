@@ -16,10 +16,11 @@ MZK3_LABEL = "created-by=mzk3"
 # `resources` object (deep-merged over these defaults).
 DEFAULT_RESOURCES: dict[str, dict[str, str]] = {
     "environmentd": {"cpu": "2", "memory": "4Gi"},
-    # 1Gi was too low: RustFS got OOMKilled under persist load, and kills
+    # 1Gi was far too low: RustFS got OOMKilled under persist load, and kills
     # mid-write corrupted the persist rollup (environmentd then crash-loops
-    # decoding it). 4Gi gives headroom.
-    "rustfs": {"cpu": "1", "memory": "4Gi"},
+    # decoding it). OOM here is catastrophic, so default to generous headroom;
+    # override down via the config file on smaller machines.
+    "rustfs": {"cpu": "1", "memory": "8Gi"},
 }
 
 # Commands that actually do work, paired with a one-line description.
