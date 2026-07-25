@@ -283,7 +283,109 @@ def cmd_reset(runner: Runner, cfg: Config) -> None:
     log.info("K3d Cluster Reset Complete!")
 
 
+# --- environment teardown / recreate -------------------------------------
+
+def _delete_environment(runner: Runner, cfg: Config) -> None:
+    inst = _instance_name(runner, cfg)
+    if not inst:
+        log.info(f"No Materialize instance found in {cfg.instance_ns}.")
+        return
+    log.step(f"Deleting Materialize instance {inst}...")
+    runner.run(["kubectl", "delete", "materialize", inst, "-n", cfg.instance_ns,
+                "--ignore-not-found", "--wait=true", "--timeout=180s"], check=False)
+    runner.run(["kubectl", "wait", "--for=delete", "pod",
+                "-l", "materialize.cloud/app=environmentd", "-n", cfg.instance_ns,
+                "--timeout=180s"], check=False)
+
+
+def _wipe_persist(runner: Runner) -> None:
+    """Empty the persist bucket in RustFS so a recreated environment starts
+    clean (recovers from persist corruption)."""
+    log.step("Wiping persist data (RustFS bucket)...")
+    pod = "mzk3-wipe-persist"
+    runner.run(["kubectl", "delete", "pod", pod, "-n", "materialize",
+                "--ignore-not-found"], check=False)
+    script = (
+        f"mc alias set r http://{c.RUSTFS_S3_HOST}:9000 "
+        f"{c.RUSTFS_ACCESS_KEY} {c.RUSTFS_SECRET_KEY} && "
+        "mc rm --recursive --force r/bucket || true; echo wiped")
+    runner.run(["kubectl", "run", pod, "-n", "materialize", "--image=minio/mc",
+                "--restart=Never", "--command", "--", "/bin/sh", "-c", script],
+               check=False)
+    runner.run(["kubectl", "wait", "--for=jsonpath={.status.phase}=Succeeded",
+                f"pod/{pod}", "-n", "materialize", "--timeout=120s"], check=False)
+    runner.run(["kubectl", "delete", "pod", pod, "-n", "materialize",
+                "--ignore-not-found"], check=False)
+
+
+def _reset_postgres_metadata(runner: Runner) -> None:
+    """Reset the Materialize metadata database (catalog/consensus)."""
+    log.step("Resetting PostgreSQL metadata...")
+    sql = "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+    runner.run(["kubectl", "exec", "-n", "materialize", "deploy/postgres", "--",
+                "sh", "-c",
+                f'PGPASSWORD=materialize_pass psql -U materialize_user '
+                f'-d materialize_db -c "{sql}"'], check=False)
+
+
+def _do_destroy_environment(runner: Runner, cfg: Config) -> None:
+    _delete_environment(runner, cfg)
+    if cfg.keep_state:
+        log.info("Keeping persist + metadata (--keep-state).")
+    else:
+        _wipe_persist(runner)
+        _reset_postgres_metadata(runner)
+
+
+def _confirm_destroy(cfg: Config, verb: str) -> bool:
+    print()
+    log.warn(f"This will {verb} the Materialize environment in "
+             f"'{cfg.instance_ns}'.")
+    if cfg.keep_state:
+        log.warn("Persist + metadata will be KEPT (--keep-state).")
+    else:
+        log.warn("Persist data and metadata will be WIPED. This is IRREVERSIBLE.")
+    print()
+    if cfg.skip_confirm:
+        return True
+    return input("Type 'yes' to confirm: ") == "yes"
+
+
+def cmd_destroy_environment(runner: Runner, cfg: Config) -> None:
+    use_cluster_context(runner, cfg.cluster_name)
+    check_prerequisites(runner)
+    if not _confirm_destroy(cfg, "tear down"):
+        log.info("Cancelled.")
+        return
+    _do_destroy_environment(runner, cfg)
+    log.info("Materialize environment destroyed.")
+
+
+def cmd_recreate_environment(runner: Runner, cfg: Config) -> None:
+    use_cluster_context(runner, cfg.cluster_name)
+    check_prerequisites(runner)
+    if not is_mzk3_cluster(runner, cfg.cluster_name) and not cfg.force:
+        # recreate needs an existing mzk3 install (operator + backends).
+        log.error(f"Cluster '{cfg.cluster_name}' was not created by mzk3. "
+                  "Use --force to proceed anyway.")
+        raise Abort
+    if not _confirm_destroy(cfg, "destroy and recreate"):
+        log.info("Cancelled.")
+        return
+
+    _do_destroy_environment(runner, cfg)
+
+    log.step("Recreating Materialize environment...")
+    _download_configs(runner, cfg)
+    _patch_configs(runner, cfg)
+    ensure_namespace(runner, cfg.instance_ns)
+    _deploy_or_skip_instance(runner, cfg)
+    log.info("Materialize environment recreated.")
+
+
 def cmd_install(runner: Runner, cfg: Config) -> None:
+    if cfg.create_cluster:
+        create_cluster(runner, cfg.cluster_name)
     if cfg.create_cluster:
         create_cluster(runner, cfg.cluster_name)
     else:
@@ -1024,6 +1126,8 @@ def cmd_help(runner: Runner, cfg: Config) -> None:
 _DISPATCH = {
     "install": cmd_install,
     "upgrade": cmd_upgrade,
+    "destroy-environment": cmd_destroy_environment,
+    "recreate-environment": cmd_recreate_environment,
     "reset": cmd_reset,
     "create-cluster": cmd_create_cluster,
     "list-versions": cmd_list_versions,

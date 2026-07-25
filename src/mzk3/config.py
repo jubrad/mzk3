@@ -28,6 +28,9 @@ _COMMAND_HELP = {
     "install": "Install Materialize (first-time setup)",
     "upgrade": "Upgrade an existing Materialize installation",
     "create-cluster": "Create a new k3d cluster for Materialize",
+    "destroy-environment": "Tear down the Materialize environment (instance + its "
+                           "state), keeping the cluster/operator/backends",
+    "recreate-environment": "Destroy then recreate the Materialize environment",
     "reset": "Destroy and recreate the k3d cluster (WARNING: destroys all data)",
     "list-versions": "List available Materialize operator versions",
     "status": "Show current deployment status",
@@ -104,6 +107,7 @@ class Config:
     force: bool
     install_dashboards: bool
     create_cluster: bool
+    keep_state: bool = False
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
@@ -167,6 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--create-cluster", dest="create_cluster",
                    action="store_true", default=None,
                    help="create the k3d cluster before installing (install only)")
+    p.add_argument("--keep-state", dest="keep_state", action="store_true",
+                   default=None,
+                   help="destroy/recreate-environment: keep persist + metadata "
+                        "instead of wiping them")
     p.add_argument("-h", "--help", action="help",
                    help="show this help message and exit")
     return p
@@ -229,6 +237,7 @@ def resolve(argv: list[str], env: Mapping[str, str] | None = None) -> tuple[str,
         install_dashboards=pick_bool(ns.install_dashboards, "install_dashboards",
                                      "MZ_INSTALL_DASHBOARDS"),
         create_cluster=pick_bool(ns.create_cluster, "create_cluster", None),
+        keep_state=pick_bool(ns.keep_state, "keep_state", None),
         resources=_merge_resources(fileconf.get("resources")),
     )
     return ns.command, cfg

@@ -151,9 +151,32 @@ The upgrade process:
 2. Patches the Materialize CR with the new `environmentdImageRef`
 3. Triggers a rolling upgrade via `requestRollout`
 
+### destroy-environment / recreate-environment
+
+Tear down (and optionally recreate) just the Materialize **environment** — the
+instance and its state — while leaving the cluster, operator, backends, and
+monitoring in place. Useful for a clean slate or recovering a corrupted
+environment without a full `reset`.
+
+```bash
+# Tear down the instance and WIPE its state (persist bucket + postgres metadata)
+mzk3 destroy-environment --yes
+
+# Same, but keep persist + metadata (just delete/leave the instance down)
+mzk3 destroy-environment --keep-state --yes
+
+# Destroy then recreate a fresh instance
+mzk3 recreate-environment --yes
+```
+
+By default the state is wiped (required to recover from persist corruption);
+`--keep-state` preserves it. `recreate-environment` only runs on clusters mzk3
+created (use `--force` to override) and requires an existing install
+(operator + backends).
+
 ### reset
 
-Destroy and recreate the k3d cluster. **Warning: This deletes all data.**
+Destroy and recreate the entire k3d cluster. **Warning: This deletes all data.**
 
 ```bash
 mzk3 reset

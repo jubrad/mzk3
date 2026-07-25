@@ -154,6 +154,43 @@ def test_upgrade_updates_operator_before_instance(tmp_path, monkeypatch):
     assert repo_add < op_upgrade < instance_patch
 
 
+def _env_responder(argv):
+    # _instance_name lookup returns an instance
+    if argv[:3] == ["kubectl", "get", "materialize"] and "metadata.name" in argv[-1]:
+        return Result(0, "myinst", "")
+    return None
+
+
+def test_destroy_environment_deletes_cr_and_wipes_state():
+    r = Runner(dry_run=True, responder=_env_responder, binaries=ALL_BINS)
+    assert main(["destroy-environment", "--yes"], runner=r) == 0
+    assert ran(r, "kubectl", "delete", "materialize", "myinst")
+    # wipes persist (mc pod) + resets postgres metadata
+    assert any(cl[:3] == ["kubectl", "run", "mzk3-wipe-persist"] for cl in r.calls)
+    assert any(cl[:3] == ["kubectl", "exec", "-n"] and "deploy/postgres" in cl
+               for cl in r.calls)
+
+
+def test_destroy_environment_keep_state_skips_wipe():
+    r = Runner(dry_run=True, responder=_env_responder, binaries=ALL_BINS)
+    assert main(["destroy-environment", "--yes", "--keep-state"], runner=r) == 0
+    assert ran(r, "kubectl", "delete", "materialize", "myinst")
+    assert not any(cl[:3] == ["kubectl", "run", "mzk3-wipe-persist"]
+                   for cl in r.calls)
+    assert not any("deploy/postgres" in cl for cl in r.calls)
+
+
+def test_recreate_environment_aborts_on_foreign_cluster():
+    def responder(argv):
+        if argv[:2] == ["docker", "inspect"]:
+            return Result(0, json.dumps([{"Config": {"Labels": {"created-by": "x"}}}]), "")
+        return _env_responder(argv)
+
+    r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
+    assert main(["recreate-environment", "--yes"], runner=r) == 1
+    assert not ran(r, "kubectl", "delete", "materialize")  # aborted before touching
+
+
 def test_install_aborts_on_foreign_cluster_without_force():
     def responder(argv):
         if argv[:2] == ["docker", "inspect"]:
