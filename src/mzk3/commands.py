@@ -65,41 +65,69 @@ def k3d_create(cluster_name: str) -> list[str]:
 
 # --- helm: operator ------------------------------------------------------
 
+def environmentd_image_ref(cfg: Config) -> str:
+    """The full environmentd image ref: an explicit override, else the stock
+    `materialize/environmentd:<version>`."""
+    return cfg.environmentd_image or f"materialize/environmentd:{cfg.version}"
+
+
+def derive_operator_image(env_image: str) -> tuple[str, str]:
+    """From an environmentd image ref derive the operator (orchestratord) image
+    repo + tag, e.g. `jubrad/environmentd:TAG` -> (`jubrad/orchestratord`, TAG).
+    The operator itself derives clusterd/balancerd from the environmentd ref."""
+    repo, _, tag = env_image.rpartition(":")
+    prefix = repo.rsplit("/", 1)[0] if "/" in repo else ""
+    return (f"{prefix}/orchestratord" if prefix else "orchestratord"), tag
+
+
+def _operator_chart(cfg: Config) -> list[str]:
+    """Chart reference for the operator: a local checkout's chart (no --version)
+    or the published chart pinned to the operator version."""
+    if cfg.local_repo:
+        return [f"{cfg.local_repo}/misc/helm-charts/operator"]
+    return ["materialize/materialize-operator", "--version", cfg.operator_version]
+
+
+def _operator_image_sets(cfg: Config) -> list[str]:
+    if not cfg.environmentd_image:
+        return []
+    repo, tag = derive_operator_image(cfg.environmentd_image)
+    return ["--set", f"operator.image.repository={repo}",
+            "--set", f"operator.image.tag={tag}"]
+
+
+_OPERATOR_SETS = [
+    "--set", "observability.enabled=true",
+    "--set", "observability.podMetrics.enabled=true",
+    "--set", "observability.prometheus.scrapeAnnotations.enabled=true",
+    "--set", "operator.cloudProvider.region=k3s",
+]
+
+
 def operator_install(cfg: Config) -> list[str]:
-    return [
-        "helm", "upgrade", "--install", cfg.release_name,
-        "materialize/materialize-operator",
-        f"--namespace={cfg.namespace}",
-        "--create-namespace",
-        "--version", cfg.operator_version,
-        "--set", "observability.enabled=true",
-        "--set", "observability.podMetrics.enabled=true",
-        "--set", "observability.prometheus.scrapeAnnotations.enabled=true",
-        "--set", "operator.cloudProvider.region=k3s",
-        "-f", cfg.values_file,
-        "--wait",
-    ]
+    return (
+        ["helm", "upgrade", "--install", cfg.release_name]
+        + _operator_chart(cfg)
+        + [f"--namespace={cfg.namespace}", "--create-namespace"]
+        + _OPERATOR_SETS + _operator_image_sets(cfg)
+        + ["-f", cfg.values_file, "--wait"]
+    )
 
 
 def operator_upgrade(cfg: Config) -> list[str]:
-    argv = [
-        "helm", "upgrade", cfg.release_name,
-        "materialize/materialize-operator",
-        "-n", cfg.namespace,
-        "--version", cfg.operator_version,
-        "--set", "observability.enabled=true",
-        "--set", "observability.podMetrics.enabled=true",
-        "--set", "observability.prometheus.scrapeAnnotations.enabled=true",
-        "--set", "operator.cloudProvider.region=k3s",
-    ]
-    argv += ["-f", cfg.values_file, "--wait"]
-    return argv
+    return (
+        ["helm", "upgrade", cfg.release_name]
+        + _operator_chart(cfg)
+        + ["-n", cfg.namespace]
+        + _OPERATOR_SETS + _operator_image_sets(cfg)
+        + ["-f", cfg.values_file, "--wait"]
+    )
 
 
 # --- kubectl: materialize instance ---------------------------------------
 
-def patch_instance_image(name: str, instance_ns: str, version: str) -> list[str]:
-    payload = {"spec": {"environmentdImageRef": f"materialize/environmentd:{version}"}}
+def patch_instance_image(name: str, instance_ns: str, image_ref: str) -> list[str]:
+    payload = {"spec": {"environmentdImageRef": image_ref}}
     return [
         "kubectl", "patch", "materialize", name,
         "-n", instance_ns,
@@ -137,7 +165,11 @@ def wait_environmentd(instance_ns: str, timeout: str = "600s") -> list[str]:
 
 
 def patch_rollout(name: str, instance_ns: str, uuid: str, *, force: bool) -> list[str]:
-    spec: dict[str, str] = {"requestRollout": uuid}
+    # forcePromote skips waiting for the new generation to rehydrate before
+    # promoting it. Without it the 0dt cutover can hang indefinitely on a small
+    # single-node dev instance (operator loops "still initializing"), so the
+    # upgrade never actually takes effect. For this dev tool we always promote.
+    spec: dict[str, str] = {"requestRollout": uuid, "forcePromote": uuid}
     if force:
         spec["forceRollout"] = uuid
     return [

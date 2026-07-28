@@ -12,11 +12,10 @@ def patch_region(text: str) -> str:
     return text.replace('region: "kind"', 'region: "k3s"')
 
 
-def patch_environmentd_image(text: str, version: str) -> str:
-    """Pin the Materialize instance image to `version`."""
-    return _ENVIRONMENTD_RE.sub(
-        f"environmentdImageRef: materialize/environmentd:{version}", text
-    )
+def patch_environmentd_image(text: str, image_ref: str) -> str:
+    """Set the Materialize instance's environmentd image to `image_ref` (a full
+    ref, stock or custom)."""
+    return _ENVIRONMENTD_RE.sub(f"environmentdImageRef: {image_ref}", text)
 
 
 def patch_environmentd_resources(text: str, cpu: str, memory: str | None = None) -> str:

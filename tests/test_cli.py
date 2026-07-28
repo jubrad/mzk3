@@ -12,9 +12,11 @@ from mzk3.cli import (
     _mz_base_metrics_path,
     _rustfs_tenant,
     ensure_operator_chart_version,
+    _upgrade_plan,
     is_mzk3_cluster,
     list_mzk3_clusters,
     main,
+    resolve_latest_version,
 )
 from mzk3.config import resolve
 from mzk3.runner import Result, Runner
@@ -137,7 +139,8 @@ def test_upgrade_updates_operator_before_instance(tmp_path, monkeypatch):
         return None
 
     r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
-    rc = main(["upgrade", "-v", "v27.0.0", "--yes"], runner=r)
+    rc = main(["upgrade", "-v", "v27.0.0", "--yes", "--component", "materialize"],
+              runner=r)
     assert rc == 0
 
     def first_index(pred):
@@ -180,6 +183,42 @@ def test_destroy_environment_keep_state_skips_wipe():
     assert not any("deploy/postgres" in cl for cl in r.calls)
 
 
+def test_upgrade_plan_describes_selected_components():
+    _, cfg = resolve(["upgrade", "-v", "v27.0.0"])
+    plan = _upgrade_plan(cfg, ["rustfs", "postgres", "materialize", "monitoring"])
+    joined = " ".join(plan)
+    assert "RustFS" in joined and "PostgreSQL" in joined
+    assert "Materialize" in joined and "v27.0.0" in joined
+    assert "Monitoring" in joined
+    # postgres line flags the downtime
+    assert any("downtime" in line for line in plan)
+
+
+def test_upgrade_preview_makes_no_changes():
+    r = Runner(dry_run=True, binaries=ALL_BINS)
+    rc = main(["upgrade", "--preview", "--component", "materialize", "-v", "v27.0.0"],
+              runner=r)
+    assert rc == 0
+    # no mutating operations happened
+    assert not any(cl[:2] == ["helm", "upgrade"]
+                   and "materialize/materialize-operator" in cl for cl in r.calls)
+    assert not ran(r, "kubectl", "patch", "materialize")
+    assert not ran(r, "kubectl", "apply", "-f", "sample-postgres.yaml")
+
+
+def test_upgrade_component_postgres_only():
+    r = Runner(dry_run=True, binaries=ALL_BINS)
+    rc = main(["upgrade", "--yes", "--component", "postgres"], runner=r)
+    assert rc == 0
+    # postgres updated (apply + rollout), operator/instance untouched
+    assert ran(r, "kubectl", "apply", "-f", "sample-postgres.yaml")
+    assert any(cl[:3] == ["kubectl", "rollout", "status"]
+               and "deployment/postgres" in cl for cl in r.calls)
+    assert not any(cl[:2] == ["helm", "upgrade"]
+                   and "materialize/materialize-operator" in cl for cl in r.calls)
+    assert not ran(r, "kubectl", "patch", "materialize")
+
+
 def test_recreate_environment_aborts_on_foreign_cluster():
     def responder(argv):
         if argv[:2] == ["docker", "inspect"]:
@@ -212,6 +251,30 @@ def _op_search_responder(argv):
     if argv[:3] == ["helm", "search", "repo"] and "--versions" in argv:
         return Result(0, json.dumps(_OP_VERSIONS), "")
     return None
+
+
+def test_resolve_latest_version_picks_newest_stable():
+    _, cfg = resolve(["upgrade", "-v", "latest"])
+    assert cfg.version == "latest" and cfg.operator_version == "latest"
+    r = Runner(dry_run=True, responder=_op_search_responder, binaries=ALL_BINS)
+    resolve_latest_version(r, cfg)
+    assert cfg.version == "v26.33.0"           # newest from the repo
+    assert cfg.operator_version == "v26.33.0"  # tracked latest too
+
+
+def test_resolve_latest_version_respects_explicit_operator_version():
+    _, cfg = resolve(["upgrade", "-v", "latest", "-o", "v26.30.1"])
+    r = Runner(dry_run=True, responder=_op_search_responder, binaries=ALL_BINS)
+    resolve_latest_version(r, cfg)
+    assert cfg.version == "v26.33.0"
+    assert cfg.operator_version == "v26.30.1"  # explicit -o not overridden
+
+
+def test_resolve_latest_version_noop_for_concrete_version():
+    _, cfg = resolve(["upgrade", "-v", "v26.30.0"])
+    r = Runner(dry_run=True, responder=_op_search_responder, binaries=ALL_BINS)
+    resolve_latest_version(r, cfg)
+    assert cfg.version == "v26.30.0"  # unchanged, no repo lookup needed
 
 
 def test_operator_chart_version_falls_back_when_image_version_has_no_chart():

@@ -32,7 +32,7 @@ def test_patch_region_noop_when_absent():
 def test_patch_environmentd_image_replaces_version():
     text = "environmentdImageRef: materialize/environmentd:v26.4.0"
     assert (
-        patch_environmentd_image(text, "v27.0.0")
+        patch_environmentd_image(text, "materialize/environmentd:v27.0.0")
         == "environmentdImageRef: materialize/environmentd:v27.0.0"
     )
 
@@ -40,7 +40,7 @@ def test_patch_environmentd_image_replaces_version():
 def test_patch_environmentd_image_handles_multi_segment_version():
     text = "environmentdImageRef: materialize/environmentd:v26.4.10"
     assert (
-        patch_environmentd_image(text, "v27.0.0")
+        patch_environmentd_image(text, "materialize/environmentd:v27.0.0")
         == "environmentdImageRef: materialize/environmentd:v27.0.0"
     )
 

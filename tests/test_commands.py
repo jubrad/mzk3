@@ -36,7 +36,7 @@ def test_operator_install_uses_versions_and_values():
 
 
 def test_instance_image_patch_is_valid_merge_json():
-    argv = c.patch_instance_image("mymz", "materialize-environment", "v27.0.0")
+    argv = c.patch_instance_image("mymz", "materialize-environment", "materialize/environmentd:v27.0.0")
     assert argv[:2] == ["kubectl", "patch"]
     assert "materialize" in argv and "mymz" in argv
     assert argv[argv.index("--type") + 1] == "merge"
@@ -44,16 +44,47 @@ def test_instance_image_patch_is_valid_merge_json():
     assert payload == {"spec": {"environmentdImageRef": "materialize/environmentd:v27.0.0"}}
 
 
-def test_rollout_patch_without_force_sets_only_request():
+def test_rollout_patch_promotes_without_force():
     argv = c.patch_rollout("mymz", "materialize-environment", "UUID-1", force=False)
     payload = json.loads(argv[argv.index("-p") + 1])
-    assert payload == {"spec": {"requestRollout": "UUID-1"}}
+    # forcePromote so the 0dt cutover completes; no forceRollout without --force
+    assert payload == {"spec": {"requestRollout": "UUID-1", "forcePromote": "UUID-1"}}
 
 
-def test_rollout_patch_with_force_sets_both():
+def test_rollout_patch_with_force_sets_all():
     argv = c.patch_rollout("mymz", "materialize-environment", "UUID-1", force=True)
     payload = json.loads(argv[argv.index("-p") + 1])
-    assert payload == {"spec": {"requestRollout": "UUID-1", "forceRollout": "UUID-1"}}
+    assert payload == {"spec": {"requestRollout": "UUID-1", "forcePromote": "UUID-1",
+                                "forceRollout": "UUID-1"}}
+
+
+def test_environmentd_image_ref_default_and_override():
+    assert c.environmentd_image_ref(cfg("install", "-v", "v27.0.0")) == \
+        "materialize/environmentd:v27.0.0"
+    conf = cfg("install", "--environmentd-image", "jubrad/environmentd:v9-dev")
+    assert c.environmentd_image_ref(conf) == "jubrad/environmentd:v9-dev"
+
+
+def test_derive_operator_image_from_environmentd_ref():
+    assert c.derive_operator_image("jubrad/environmentd:v26.35.0-dev.0--x") == \
+        ("jubrad/orchestratord", "v26.35.0-dev.0--x")
+    assert c.derive_operator_image("localhost:5000/me/environmentd:t") == \
+        ("localhost:5000/me/orchestratord", "t")
+
+
+def test_operator_install_custom_image_sets_operator_and_derives_repo():
+    conf = cfg("install", "--environmentd-image", "jubrad/environmentd:tag9")
+    argv = c.operator_install(conf)
+    assert "operator.image.repository=jubrad/orchestratord" in argv
+    assert "operator.image.tag=tag9" in argv
+
+
+def test_operator_install_local_repo_uses_local_chart_no_version():
+    conf = cfg("install", "--local-repo", "/home/me/materialize", "-v", "v27.0.0")
+    argv = c.operator_install(conf)
+    assert "/home/me/materialize/misc/helm-charts/operator" in argv
+    assert "materialize/materialize-operator" not in argv
+    assert "--version" not in argv  # local chart carries its own version
 
 
 def test_operator_upgrade_targets_operator_version_not_mz_version():

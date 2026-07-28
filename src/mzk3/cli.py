@@ -413,6 +413,7 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
         log.warn(f"Cluster '{cfg.cluster_name}' was not created by mzk3.")
         log.warn("Proceeding anyway due to --force flag.")
 
+    resolve_latest_version(runner, cfg)
     log.info(f"Using Materialize version: {cfg.version}")
     log.info(f"Using Operator version: {cfg.operator_version}")
 
@@ -457,61 +458,156 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
     _print_success_install(cfg)
 
 
-def cmd_upgrade(runner: Runner, cfg: Config) -> None:
-    check_prerequisites(runner)
-    require(runner, "uuidgen", "uuidgen is not installed. Please install it first.")
+def _present_components(runner: Runner, cfg: Config) -> list[str]:
+    """Which components are currently installed (for the default upgrade set)."""
+    present = []
 
-    log.info(f"Target Materialize version: {cfg.version}")
-    log.info(f"Target Operator version: {cfg.operator_version}")
+    def exists(argv):
+        return runner.run(argv, check=False, capture=True).ok
 
-    log.step("Step 1: Updating Helm repository...")
-    # add + update: `helm repo update <name>` fails if the repo was never added
-    # (e.g. upgrading from a fresh checkout), which would make the operator
-    # chart unresolvable.
-    helm_repo_setup(runner, "materialize", HELM_REPO)
+    if _current_operator_version(runner, cfg) or _instance_name(runner, cfg):
+        present.append("materialize")
+    if exists(["helm", "status", "mz-monitoring", "-n", "monitoring"]):
+        present.append("monitoring")
+    if exists(["kubectl", "get", "tenant", "rustfs", "-n", "materialize"]):
+        present.append("rustfs")
+    if exists(["kubectl", "get", "deployment", "postgres", "-n", "materialize"]):
+        present.append("postgres")
+    return present
 
-    log.step("Step 2: Checking current deployment...")
-    runner.run(["helm", "list", "-n", cfg.namespace], check=False)
+
+def _upgrade_materialize(runner: Runner, cfg: Config) -> None:
+    ensure_operator_chart_version(runner, cfg)
+    log.step(f"Upgrading Materialize Operator to {cfg.operator_version}...")
+    if Path(cfg.values_file).is_file():
+        log.info(f"Using values file: {cfg.values_file}")
+    else:
+        from . import patch
+        download(c.operator_values_url(cfg), cfg.values_file)
+        vf = Path(cfg.values_file)
+        vf.write_text(patch.patch_region(vf.read_text()))
+    runner.run(c.operator_upgrade(cfg))
+    log.info("Waiting for operator to be ready...")
+    runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
+                f"deployment/{cfg.release_name}", "-n", cfg.namespace])
 
     instance = _instance_name(runner, cfg)
-    if not instance:
-        log.warn(f"No Materialize instance found in {cfg.instance_ns}. "
-                 "Will only upgrade the operator.")
+    if instance:
+        _upgrade_instance(runner, cfg, instance)
+    else:
+        log.warn(f"No Materialize instance in {cfg.instance_ns}; operator only.")
+
+
+def _upgrade_rustfs(runner: Runner, cfg: Config) -> None:
+    log.step("Updating RustFS (operator + tenant)...")
+    install_rustfs_operator(runner)
+    _deploy_rustfs(runner, cfg)
+
+
+def _upgrade_monitoring(runner: Runner, cfg: Config) -> None:
+    install_monitoring(runner, cfg)
+
+
+def _prepull_image(runner: Runner, image: str) -> None:
+    """Cache an image on the node so a subsequent rolling swap starts fast."""
+    pod = "mzk3-prepull"
+    runner.run(["kubectl", "delete", "pod", pod, "-n", "materialize",
+                "--ignore-not-found"], check=False)
+    runner.run(["kubectl", "run", pod, "-n", "materialize", f"--image={image}",
+                "--restart=Never", "--command", "--", "true"], check=False)
+    runner.run(["kubectl", "wait", "--for=jsonpath={.status.phase}=Succeeded",
+                f"pod/{pod}", "-n", "materialize", "--timeout=180s"], check=False)
+    runner.run(["kubectl", "delete", "pod", pod, "-n", "materialize",
+                "--ignore-not-found"], check=False)
+
+
+def _upgrade_postgres(runner: Runner, cfg: Config) -> None:
+    log.step("Updating PostgreSQL (pre-pull image, then rolling swap)...")
+    img = _manifest_image("sample-postgres.yaml")
+    if img:
+        log.info(f"Pre-pulling {img} to minimize downtime...")
+        _prepull_image(runner, img)
+    apply_manifest(runner, "sample-postgres.yaml")
+    runner.run(["kubectl", "rollout", "status", "deployment/postgres",
+                "-n", "materialize", "--timeout=180s"], check=False)
+
+
+def _manifest_image(path: str) -> str:
+    p = Path(path)
+    if not p.is_file():
+        return ""
+    for line in p.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("image:"):
+            return s.split(":", 1)[1].strip().strip('"\'')
+    return ""
+
+
+def _upgrade_plan(cfg: Config, components: list[str]) -> list[str]:
+    """Human-readable description of what an upgrade would do (order matches
+    execution)."""
+    lines = []
+    if "rustfs" in components:
+        lines.append(f"RustFS: upgrade operator to {c.RUSTFS_OPERATOR_VERSION}, "
+                     "re-apply Tenant")
+    if "postgres" in components:
+        lines.append("PostgreSQL: pre-pull image, then rolling swap "
+                     "(brief metadata downtime)")
+    if "materialize" in components:
+        lines.append(f"Materialize: operator + instance -> {cfg.version} "
+                     f"(operator chart {cfg.operator_version})")
+    if "monitoring" in components:
+        lines.append(f"Monitoring: helm upgrade stack to {c.MONITORING_VERSION}")
+    return lines
+
+
+def cmd_upgrade(runner: Runner, cfg: Config) -> None:
+    use_cluster_context(runner, cfg.cluster_name)
+    check_prerequisites(runner)
+    helm_repo_setup(runner, "materialize", HELM_REPO)
+    resolve_latest_version(runner, cfg)  # -v latest -> newest stable
+
+    components = cfg.components or _present_components(runner, cfg)
+    if not components:
+        log.error("No installed components found to upgrade. Run install first.")
+        raise Abort
 
     print()
-    log.warn(f"This will upgrade Materialize to version {cfg.version}")
+    log.info("Upgrade plan:")
+    for line in _upgrade_plan(cfg, components):
+        log.info(f"  - {line}")
+    print()
+
+    if cfg.preview:
+        log.info("Preview only — no changes made.")
+        return
+
+    if "materialize" in components:
+        require(runner, "uuidgen", "uuidgen is not installed.")
     if not cfg.skip_confirm:
         reply = input("Continue with upgrade? (y/N) ")
         if reply.strip().lower() not in ("y", "yes"):
             log.info("Upgrade cancelled.")
             return
 
-    ensure_operator_chart_version(runner, cfg)
-    log.step(f"Step 3: Upgrading Materialize Operator to {cfg.operator_version}...")
-    # Ensure a values file matching the *target* operator version. A custom or
-    # prior file is respected; a missing one is fetched (and region-patched) so
-    # we never upgrade the operator with no values / stale keys.
-    if Path(cfg.values_file).is_file():
-        log.info(f"Using values file: {cfg.values_file}")
-    else:
-        log.info(f"Values file {cfg.values_file} not found; downloading operator "
-                 f"values for {cfg.operator_version}...")
-        from . import patch
-        download(c.operator_values_url(cfg), cfg.values_file)
-        vf = Path(cfg.values_file)
-        vf.write_text(patch.patch_region(vf.read_text()))
-    runner.run(c.operator_upgrade(cfg))
+    # Materialize + postgres need the downloaded/patched manifests.
+    if {"materialize", "postgres"} & set(components):
+        _download_configs(runner, cfg)
+        _patch_configs(runner, cfg)
 
-    log.info("Waiting for operator to be ready...")
-    runner.run(["kubectl", "wait", "--for=condition=available", "--timeout=300s",
-                f"deployment/{cfg.release_name}", "-n", cfg.namespace])
-    log.info("Operator upgraded successfully.")
-
-    if instance:
-        _upgrade_instance(runner, cfg, instance)
+    # Backends first (so they're current before the instance rolls), then
+    # Materialize, then the independent monitoring stack.
+    if "rustfs" in components:
+        _upgrade_rustfs(runner, cfg)
+    if "postgres" in components:
+        _upgrade_postgres(runner, cfg)
+    if "materialize" in components:
+        _upgrade_materialize(runner, cfg)
+    if "monitoring" in components:
+        _upgrade_monitoring(runner, cfg)
 
     print()
-    log.info("Materialize Upgrade Complete!")
+    log.info("Upgrade complete.")
 
 
 # --- install sub-steps ---------------------------------------------------
@@ -532,6 +628,18 @@ def _label_nodes(runner: Runner) -> None:
 
 
 def _download_configs(runner: Runner, cfg: Config) -> None:
+    if runner.dry_run:
+        return
+    if cfg.local_repo:
+        base = Path(cfg.local_repo) / "misc" / "helm-charts"
+        log.step(f"Using local materialize checkout at {cfg.local_repo}...")
+        Path("sample-values-k3s.yaml").write_text(
+            (base / "operator" / "values.yaml").read_text())
+        Path("sample-postgres.yaml").write_text(
+            (base / "testing" / "postgres.yaml").read_text())
+        Path("sample-materialize.yaml").write_text(
+            (base / "testing" / "materialize.yaml").read_text())
+        return
     log.step("Downloading Materialize configuration files...")
     download(c.operator_values_url(cfg), "sample-values-k3s.yaml")
     download(c.postgres_manifest_url(cfg), "sample-postgres.yaml")
@@ -615,15 +723,18 @@ spec:
 
 
 def _patch_configs(runner: Runner, cfg: Config) -> None:
+    if runner.dry_run:
+        return
     from . import patch
 
     log.info("Patching configuration for K3s...")
     values = Path("sample-values-k3s.yaml")
     values.write_text(patch.patch_region(values.read_text()))
 
-    log.info(f"Patching Materialize CR with version {cfg.version}...")
+    image_ref = c.environmentd_image_ref(cfg)
+    log.info(f"Patching Materialize CR image to {image_ref}...")
     mz = Path("sample-materialize.yaml")
-    mz.write_text(patch.patch_environmentd_image(mz.read_text(), cfg.version))
+    mz.write_text(patch.patch_environmentd_image(mz.read_text(), image_ref))
 
     envd = cfg.resources.get("environmentd", {})
     log.info(f"Setting environmentd resources (cpu={envd.get('cpu')}, "
@@ -685,6 +796,30 @@ def operator_chart_versions(runner: Runner) -> list[str]:
         return []
 
 
+def resolve_latest_version(runner: Runner, cfg: Config) -> None:
+    """Resolve a `latest` version to the newest stable release.
+
+    `helm search repo ... --versions` (no --devel) lists only stable chart
+    versions newest-first, and the operator chart / environmentd image are
+    released in lockstep, so the newest chart version is the latest stable
+    Materialize version for both. Applies to `version` and/or `operator_version`.
+    """
+    if cfg.local_repo or "latest" not in (cfg.version, cfg.operator_version):
+        return
+    helm_repo_setup(runner, "materialize", HELM_REPO)  # ensure repo for search
+    versions = operator_chart_versions(runner)
+    if not versions:
+        log.error("Could not determine the latest version from the materialize "
+                  "helm repo.")
+        raise Abort
+    latest = versions[0]
+    log.info(f"Resolving 'latest' to {latest}")
+    if cfg.version == "latest":
+        cfg.version = latest
+    if cfg.operator_version == "latest":
+        cfg.operator_version = latest
+
+
 def ensure_operator_chart_version(runner: Runner, cfg: Config) -> None:
     """Resolve cfg.operator_version to a chart version that actually exists.
 
@@ -693,6 +828,8 @@ def ensure_operator_chart_version(runner: Runner, cfg: Config) -> None:
     repo may only have v26.30.1). Use the exact version if present, otherwise
     fall back to the latest available chart and warn.
     """
+    if cfg.local_repo:  # local chart carries its own version
+        return
     versions = operator_chart_versions(runner)
     if not versions or cfg.operator_version in versions:
         return
@@ -767,7 +904,7 @@ def _wait_environmentd_ready(runner: Runner, cfg: Config) -> None:
 
 
 def _deploy_or_skip_instance(runner: Runner, cfg: Config) -> None:
-    target = f"materialize/environmentd:{cfg.version}"
+    target = c.environmentd_image_ref(cfg)
     if _current_instance_image(runner, cfg) == target:
         log.info(f"Materialize instance already at version {cfg.version}. Skipping.")
         return
@@ -789,10 +926,11 @@ def _instance_name(runner: Runner, cfg: Config) -> str:
 
 
 def _upgrade_instance(runner: Runner, cfg: Config, instance: str) -> None:
+    image_ref = c.environmentd_image_ref(cfg)
     log.step(f"Step 4: Upgrading Materialize instance {instance}...")
-    log.info(f"Target image: materialize/environmentd:{cfg.version}")
+    log.info(f"Target image: {image_ref}")
     log.info("Staging version change...")
-    runner.run(c.patch_instance_image(instance, cfg.instance_ns, cfg.version))
+    runner.run(c.patch_instance_image(instance, cfg.instance_ns, image_ref))
 
     log.step("Step 5: Triggering rollout...")
     rollout = str(uuid.uuid4()) if runner.dry_run else _uuidgen(runner)
@@ -803,6 +941,31 @@ def _upgrade_instance(runner: Runner, cfg: Config, instance: str) -> None:
 
     log.info("Rollout triggered. Waiting for new pods to be ready...")
     _wait_environmentd_ready(runner, cfg)
+
+    # New pods being Ready isn't the end: the operator promotes the new
+    # generation and retires the old one. Wait until only the target image
+    # remains (the old generation is gone).
+    _wait_generation_promoted(runner, cfg, image_ref)
+
+
+def _wait_generation_promoted(runner: Runner, cfg: Config, image_ref: str) -> None:
+    log.info("Waiting for the old generation to retire...")
+    if runner.dry_run:
+        return
+    for _ in range(120):
+        res = runner.run(
+            ["kubectl", "get", "pods", "-l", "materialize.cloud/app=environmentd",
+             "-n", cfg.instance_ns, "-o",
+             "jsonpath={.items[*].spec.containers[0].image}"],
+            check=False, capture=True,
+        )
+        images = set(res.stdout.split())
+        if images == {image_ref}:  # only the new generation remains
+            log.info("Rollout complete; new generation promoted.")
+            return
+        time.sleep(5)
+    log.warn(f"Old environmentd generation still present after waiting. Check: "
+             f"kubectl get pods -n {cfg.instance_ns}")
 
 
 def _uuidgen(runner: Runner) -> str:

@@ -133,23 +133,60 @@ mzk3 install [options]
 
 ### upgrade
 
-Upgrade an existing Materialize deployment to a new version.
+Upgrade an existing deployment. By default it updates **all installed
+components** (Materialize, monitoring, RustFS, postgres); scope it with
+`--component` (repeatable).
 
 ```bash
-# Standard upgrade
-mzk3 upgrade -v v26.12.1
-
-# Force upgrade (bypasses safety checks)
-mzk3 upgrade -v v26.12.1 --force
-
-# Skip confirmation prompt
-mzk3 upgrade -v v26.12.1 -y
+mzk3 upgrade -v v26.12.1          # all components, Materialize -> v26.12.1
+mzk3 upgrade -v latest            # newest stable release (resolved from the repo)
+mzk3 upgrade --preview            # print the plan and exit, no changes
+mzk3 upgrade --component monitoring          # just the monitoring stack
+mzk3 upgrade --component postgres --component rustfs
+mzk3 upgrade -v v26.12.1 --force  # also force the rollout
+mzk3 upgrade -v v26.12.1 -y       # skip the confirmation prompt
 ```
 
-The upgrade process:
-1. Updates the Materialize Operator
-2. Patches the Materialize CR with the new `environmentdImageRef`
-3. Triggers a rolling upgrade via `requestRollout`
+- `-v latest` resolves to the newest stable chart version from the helm repo
+  (chart version == Materialize version). `-o` still pins the operator chart
+  independently.
+- `--preview` prints the per-component plan (resolved versions + actions) and
+  exits. Without it, `upgrade` shows that plan and prompts before proceeding.
+- **Materialize**: upgrades the operator, patches the CR's `environmentdImageRef`,
+  triggers a rollout, and (via `forcePromote`) completes the 0dt cutover so the
+  new generation is promoted and the old one retired.
+- **PostgreSQL**: pre-pulls the target image, then does a rolling swap
+  (brief metadata downtime; true zero-downtime would need replication).
+- **RustFS / monitoring**: helm-upgraded to the versions this mzk3 ships.
+
+### Development: local charts and custom images
+
+For working against a local Materialize checkout and/or dev-built images:
+
+```bash
+# Use a local materialize clone's operator chart + testing manifests
+mzk3 install --local-repo ~/src/materialize
+
+# Use a custom-built environmentd image from your own registry
+mzk3 install \
+  --environmentd-image jubrad/environmentd:v26.35.0-dev.0--local.orchestrator-mgmt-console
+
+# Both together (upgrade an existing env to your dev build)
+mzk3 upgrade --component materialize \
+  --local-repo ~/src/materialize \
+  --environmentd-image jubrad/environmentd:v26.35.0-dev.0--local.foo
+```
+
+- `--local-repo PATH` uses `PATH/misc/helm-charts/operator` (the operator chart)
+  and `PATH/misc/helm-charts/testing/*.yaml` instead of the published chart and
+  raw git tags. Version resolution is skipped (the local chart carries its own).
+- `--environmentd-image REF` sets the CR's `environmentdImageRef` verbatim. The
+  operator derives clusterd/balancerd from it, and mzk3 derives the operator
+  (orchestratord) image as `<prefix>/orchestratord:<tag>` — so all Materialize
+  images come from your registry.
+
+### destroy-environment / recreate-environment
+
 
 ### destroy-environment / recreate-environment
 

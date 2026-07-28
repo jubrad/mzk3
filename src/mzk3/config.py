@@ -108,7 +108,14 @@ class Config:
     install_dashboards: bool
     create_cluster: bool
     keep_state: bool = False
+    preview: bool = False
+    local_repo: str | None = None
+    environmentd_image: str | None = None
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
+    components: list[str] = field(default_factory=list)
+
+
+UPGRADE_COMPONENTS = ("materialize", "monitoring", "rustfs", "postgres")
 
 
 def _merge_resources(override: Mapping | None) -> dict[str, dict[str, str]]:
@@ -138,8 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "(overrides env; overridden by explicit flags)")
     p.add_argument("-v", "--version", dest="version", default=None,
                    metavar="VERSION",
-                   help="Materialize version to install/upgrade to "
-                        f"(default: {DEFAULT_VERSION})")
+                   help="Materialize version to install/upgrade to, or 'latest' "
+                        f"for the newest stable release (default: {DEFAULT_VERSION})")
     p.add_argument("-o", "--operator-version", dest="operator_version",
                    default=None, metavar="VER",
                    help="operator chart version (default: same as --version)")
@@ -175,6 +182,19 @@ def build_parser() -> argparse.ArgumentParser:
                    default=None,
                    help="destroy/recreate-environment: keep persist + metadata "
                         "instead of wiping them")
+    p.add_argument("--component", dest="components", action="append",
+                   choices=UPGRADE_COMPONENTS, default=None,
+                   help="upgrade: limit to these components (repeatable; "
+                        "default: all installed)")
+    p.add_argument("--preview", dest="preview", action="store_true", default=None,
+                   help="upgrade: print the plan and exit without making changes")
+    p.add_argument("--local-repo", dest="local_repo", default=None, metavar="PATH",
+                   help="use a local materialize checkout for the operator helm "
+                        "chart and testing manifests instead of the published ones")
+    p.add_argument("--environmentd-image", dest="environmentd_image", default=None,
+                   metavar="REF",
+                   help="full environmentd image ref (e.g. myrepo/environmentd:tag); "
+                        "clusterd/balancerd/operator images are derived from it")
     p.add_argument("-h", "--help", action="help",
                    help="show this help message and exit")
     return p
@@ -238,7 +258,13 @@ def resolve(argv: list[str], env: Mapping[str, str] | None = None) -> tuple[str,
                                      "MZ_INSTALL_DASHBOARDS"),
         create_cluster=pick_bool(ns.create_cluster, "create_cluster", None),
         keep_state=pick_bool(ns.keep_state, "keep_state", None),
+        preview=pick_bool(ns.preview, "preview", None),
+        local_repo=pick(ns.local_repo, "local_repo", None, None) or None,
+        environmentd_image=pick(ns.environmentd_image, "environmentd_image",
+                                None, None) or None,
         resources=_merge_resources(fileconf.get("resources")),
+        components=(ns.components if ns.components is not None
+                    else (fileconf.get("components") or [])),
     )
     return ns.command, cfg
 
