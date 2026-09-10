@@ -21,19 +21,20 @@ DEFAULT_RESOURCES: dict[str, dict[str, str]] = {
     # decoding it). OOM here is catastrophic, so default to generous headroom;
     # override down via the config file on smaller machines.
     "rustfs": {"cpu": "1", "memory": "8Gi"},
-    # Optional demo components (--demo). Small: they hold a handful of rows.
-    "demo-postgres": {"cpu": "500m", "memory": "512Mi"},
-    "demo-mysql": {"cpu": "1", "memory": "1Gi"},
-    "demo-kafka": {"cpu": "1", "memory": "1Gi"},
+    # Optional add-ons (--addon / --install-demo). Sized for a laptop.
+    "addon-postgres": {"cpu": "500m", "memory": "512Mi"},
+    "addon-mysql": {"cpu": "1", "memory": "1Gi"},
+    "addon-kafka": {"cpu": "1", "memory": "1Gi"},
     # Polaris is a JVM; its Postgres metastore gets its own small container.
-    "demo-iceberg": {"cpu": "1", "memory": "1536Mi"},
-    "demo-iceberg-db": {"cpu": "250m", "memory": "256Mi"},
+    "addon-iceberg": {"cpu": "1", "memory": "1536Mi"},
+    "addon-iceberg-db": {"cpu": "250m", "memory": "256Mi"},
 }
 
-# Optional demo infrastructure that can be deployed alongside Materialize so a
-# fresh install has realistic upstream systems (and an Iceberg catalog) to point
-# sources and sinks at. See demo.py.
-DEMO_COMPONENTS = ("postgres", "mysql", "kafka", "iceberg")
+# Optional add-ons deployed alongside Materialize: upstream systems to point
+# sources at and an Iceberg catalog to sink into. `--addon` deploys them clean
+# (replication-ready, a `materialize` user, no data); `--install-demo` also
+# seeds demo data and writes a SQL walkthrough. See addons.py.
+ADDONS = ("postgres", "mysql", "kafka", "iceberg")
 
 # Commands that actually do work, paired with a one-line description.
 _COMMAND_HELP = {
@@ -70,8 +71,9 @@ Environment variables (used as defaults; flags override):
     MZ_VALUES_FILE       Path to values file
     MZ_SKIP_CONFIRM      Skip confirmation prompts ("true"/"false")
     MZ_INSTALL_DASHBOARDS  Install monitoring stack ("true"/"false")
-    MZ_DEMO              Demo components to deploy, comma-separated
+    MZ_ADDONS            Add-ons to deploy, comma-separated
                          (postgres,mysql,kafka,iceberg or "all")
+    MZ_INSTALL_DEMO      Add-ons to deploy WITH demo data, comma-separated
     MZ_CONFIG            Path to a JSON config file
 
 Config file (--config / MZ_CONFIG):
@@ -80,7 +82,8 @@ Config file (--config / MZ_CONFIG):
       {{
         "version": "v26.30.0",
         "install_dashboards": true,
-        "demo": ["postgres", "kafka"],
+        "addons": ["postgres"],
+        "install_demo": ["kafka"],
         "resources": {{
           "environmentd": {{"cpu": "2", "memory": "4Gi"}},
           "rustfs":       {{"cpu": "1", "memory": "1Gi"}}
@@ -100,24 +103,30 @@ Examples:
     mzk3 install -c my-cluster -l ./license.key      # on an existing mzk3 cluster
     mzk3 install -v {DEFAULT_VERSION} -l ./license.key
     mzk3 install -l ./license.key --install-dashboards  # + Prometheus/Grafana
-    mzk3 install -l ./license.key --demo postgres --demo kafka  # + demo sources
-    mzk3 install -l ./license.key --demo all  # postgres, mysql, kafka + Iceberg
+    mzk3 install -l ./license.key --addon postgres,kafka  # + clean upstream systems
+    mzk3 install -l ./license.key --install-demo  # all add-ons, seeded, with SQL walkthrough
+    mzk3 install -l ./license.key --install-demo kafka --addon postgres
     mzk3 install -l ./license.key --force   # install on any cluster (skip safety check)
     mzk3 upgrade -v v26.5.0 --yes           # upgrade, no prompt
     mzk3 upgrade -v v26.5.0 --force         # force a rollout
-    mzk3 upgrade --component demo           # re-apply the demo manifests
+    mzk3 upgrade --component addons         # re-apply the add-on manifests
     mzk3 reset --yes                        # destroy + recreate, no prompt
     mzk3 status
     mzk3 list-versions
 
-Demo components (--demo / MZ_DEMO / config "demo"):
-    postgres   PostgreSQL 16 with logical replication + a seeded schema
-    mysql      MySQL 8.4 with GTID binlog replication + a seeded schema
-    kafka      Redpanda (Kafka API + schema registry) with a seeded topic
+Add-ons (--addon NAME[,NAME] / MZ_ADDONS / config "addons"):
+    postgres   PostgreSQL 16, logical replication on, `materialize` replication user
+    mysql      MySQL 8.4, GTID binlog replication on, `materialize` replication user
+    kafka      Redpanda (Kafka API + schema registry + HTTP proxy)
     iceberg    Apache Polaris Iceberg REST catalog, warehouse on RustFS
     all        everything above
-    Each writes a ready-to-run demo-<name>.sql with the matching Materialize
-    CREATE CONNECTION / SOURCE / SINK statements.
+    Deployed clean: bring your own schema/topics. Each writes addon-<name>.sql
+    with the matching Materialize CREATE CONNECTION statements.
+
+Demo (--install-demo [NAME[,NAME]] / MZ_INSTALL_DEMO / config "install_demo"):
+    The same add-ons WITH seeded demo data (customers/orders tables, a keyed
+    JSON topic) and a demo-<name>.sql walkthrough of sources, views and sinks.
+    Bare --install-demo means all. See DEMO.md.
 
 Cluster safety:
     install only installs on clusters it created (identified by a
@@ -146,16 +155,19 @@ class Config:
     environmentd_image: str | None = None
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
     components: list[str] = field(default_factory=list)
+    # Add-ons to deploy, and the subset of them to seed with demo data
+    # (--install-demo implies --addon for the same names).
+    addons: list[str] = field(default_factory=list)
     demo: list[str] = field(default_factory=list)
 
 
-UPGRADE_COMPONENTS = ("materialize", "monitoring", "rustfs", "postgres", "demo")
+UPGRADE_COMPONENTS = ("materialize", "monitoring", "rustfs", "postgres", "addons")
 
 
-def normalize_demo(values) -> list[str]:
-    """Flatten/validate demo component names from any layer (flag, config file,
-    env). Accepts nested lists and comma-separated strings, expands `all`,
-    dedupes, and returns them in canonical DEMO_COMPONENTS order."""
+def normalize_addons(values) -> list[str]:
+    """Flatten/validate add-on names from any layer (flag, config file, env).
+    Accepts nested lists and comma-separated strings, expands `all`, dedupes,
+    and returns them in canonical ADDONS order."""
     names: list[str] = []
 
     def walk(v):
@@ -169,19 +181,19 @@ def normalize_demo(values) -> list[str]:
 
     walk(values)
     if "all" in names:
-        return list(DEMO_COMPONENTS)
-    unknown = sorted(set(names) - set(DEMO_COMPONENTS))
+        return list(ADDONS)
+    unknown = sorted(set(names) - set(ADDONS))
     if unknown:
         raise ValueError(
-            f"unknown demo component(s): {', '.join(unknown)} "
-            f"(choose from {', '.join(DEMO_COMPONENTS)}, all)")
-    return [c for c in DEMO_COMPONENTS if c in names]
+            f"unknown add-on(s): {', '.join(unknown)} "
+            f"(choose from {', '.join(ADDONS)}, all)")
+    return [c for c in ADDONS if c in names]
 
 
-def _demo_arg(value: str) -> list[str]:
-    """argparse `type` for --demo: validates and splits `a,b` into a list."""
+def _addon_arg(value: str) -> list[str]:
+    """argparse `type` for --addon/--install-demo: validates and splits `a,b`."""
     try:
-        return normalize_demo(value)
+        return normalize_addons(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from e
 
@@ -243,12 +255,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--install-dashboards", dest="install_dashboards",
                    action="store_true", default=None,
                    help="install the Prometheus + Grafana monitoring stack")
-    p.add_argument("--demo", dest="demo", action="extend", type=_demo_arg,
+    p.add_argument("--addon", dest="addons", action="extend", type=_addon_arg,
                    default=None, metavar="NAME",
-                   help="deploy demo infrastructure alongside Materialize: "
-                        "postgres, mysql, kafka (Redpanda), iceberg (Polaris "
-                        "catalog on RustFS), or all (repeatable / "
+                   help="deploy an add-on alongside Materialize, without demo "
+                        "data: postgres, mysql, kafka (Redpanda), iceberg "
+                        "(Polaris catalog on RustFS), or all (repeatable / "
                         "comma-separated)")
+    p.add_argument("--install-demo", dest="demo", nargs="?", const="all",
+                   action="extend", type=_addon_arg, default=None, metavar="NAME",
+                   help="deploy add-ons WITH seeded demo data and a SQL "
+                        "walkthrough; NAME as for --addon, default all")
     p.add_argument("--create-cluster", dest="create_cluster",
                    action="store_true", default=None,
                    help="create the k3d cluster before installing (install only)")
@@ -339,20 +355,24 @@ def resolve(argv: list[str], env: Mapping[str, str] | None = None) -> tuple[str,
         resources=_merge_resources(fileconf.get("resources")),
         components=(ns.components if ns.components is not None
                     else (fileconf.get("components") or [])),
-        demo=_resolve_demo(ns.demo, fileconf.get("demo"), env.get("MZ_DEMO")),
     )
+    cfg.demo = _resolve_list(ns.demo, fileconf.get("install_demo"),
+                             env.get("MZ_INSTALL_DEMO"))
+    addons = _resolve_list(ns.addons, fileconf.get("addons"), env.get("MZ_ADDONS"))
+    # Seeding implies deploying: --install-demo X is --addon X plus data.
+    cfg.addons = [a for a in ADDONS if a in set(addons) | set(cfg.demo)]
     return ns.command, cfg
 
 
-def _resolve_demo(flag, fileval, envval) -> list[str]:
+def _resolve_list(flag, fileval, envval) -> list[str]:
     """flag > config file > env, like every other setting; each layer is a
     complete list (they don't accumulate)."""
     if flag is not None:
-        return normalize_demo(flag)
+        return normalize_addons(flag)
     if fileval is not None:
-        return normalize_demo(fileval)
+        return normalize_addons(fileval)
     if envval:
-        return normalize_demo(envval)
+        return normalize_addons(envval)
     return []
 
 

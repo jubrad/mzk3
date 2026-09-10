@@ -7,7 +7,8 @@
 /monitoring-values.yaml
 /materialize-monitoring.tar.gz
 /materialize-monitoring-src/
-/demo-*.yaml
+/addon-*.yaml
+/addon-*.sql
 /demo-*.sql
 
 # Python

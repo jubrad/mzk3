@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import commands as c
-from . import demo
+from . import addons
 from . import log
 from .commands import HELM_REPO
 from .config import Config, build_parser, resolve
@@ -255,9 +255,9 @@ def cmd_status(runner: Runner, cfg: Config) -> None:
         (f"=== Services in {cfg.instance_ns} ===",
          ["kubectl", "get", "svc", "-n", cfg.instance_ns],
          f"No services found in {cfg.instance_ns}"),
-        (f"=== Demo components (pods in {demo.NAMESPACE}) ===",
-         ["kubectl", "get", "pods", "-n", demo.NAMESPACE],
-         "No demo components installed (mzk3 install --demo ...)"),
+        (f"=== Add-ons (pods in {addons.NAMESPACE}) ===",
+         ["kubectl", "get", "pods", "-n", addons.NAMESPACE],
+         "No add-ons installed (mzk3 install --addon ... / --install-demo)"),
     ]:
         print()
         log.info(title)
@@ -478,11 +478,11 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
     if cfg.install_dashboards:
         tasks.append(lambda: install_monitoring(runner, cfg))
         extras.append("monitoring")
-    if cfg.demo:
-        # Demo infra only needs the cluster (and RustFS, ready above) -- not
-        # the instance -- so it comes up alongside it.
-        tasks.append(lambda: demo.install(runner, cfg, cfg.demo))
-        extras.append("demo components")
+    if cfg.addons:
+        # Add-ons only need the cluster (and RustFS, ready above) -- not the
+        # instance -- so they come up alongside it.
+        tasks.append(lambda: addons.install(runner, cfg, cfg.addons, set(cfg.demo)))
+        extras.append("add-ons")
     if extras:
         log.step("Deploying Materialize instance and "
                  f"{' + '.join(extras)} (in parallel)...")
@@ -506,8 +506,8 @@ def _present_components(runner: Runner, cfg: Config) -> list[str]:
         present.append("rustfs")
     if exists(["kubectl", "get", "deployment", "postgres", "-n", "materialize"]):
         present.append("postgres")
-    if demo.present(runner):
-        present.append("demo")
+    if addons.present(runner):
+        present.append("addons")
     return present
 
 
@@ -543,20 +543,22 @@ def _upgrade_monitoring(runner: Runner, cfg: Config) -> None:
     install_monitoring(runner, cfg)
 
 
-def _demo_targets(runner: Runner, cfg: Config) -> list[str]:
-    """Demo components an upgrade touches: whatever is deployed, plus any
-    newly requested with --demo."""
-    wanted = set(demo.present(runner)) | set(cfg.demo)
-    return [comp for comp in demo.MANIFESTS if comp in wanted]
+def _addon_targets(runner: Runner, cfg: Config) -> tuple[list[str], set[str]]:
+    """Add-ons an upgrade touches: whatever is deployed (keeping each one's
+    seeded/clean flavor), plus any newly requested with --addon/--install-demo."""
+    deployed = addons.present(runner)
+    wanted = set(deployed) | set(cfg.addons)
+    seeded = {comp for comp, seed in deployed.items() if seed} | set(cfg.demo)
+    return [comp for comp in addons.ADDONS if comp in wanted], seeded
 
 
-def _upgrade_demo(runner: Runner, cfg: Config) -> None:
-    targets = _demo_targets(runner, cfg)
+def _upgrade_addons(runner: Runner, cfg: Config) -> None:
+    targets, seeded = _addon_targets(runner, cfg)
     if not targets:
-        log.warn("No demo components deployed or requested (--demo); skipping.")
+        log.warn("No add-ons deployed or requested (--addon/--install-demo); skipping.")
         return
-    log.step("Re-applying demo components (manifests pinned by this mzk3)...")
-    demo.install(runner, cfg, targets)
+    log.step("Re-applying add-ons (manifests pinned by this mzk3)...")
+    addons.install(runner, cfg, targets, seeded)
 
 
 def _prepull_image(runner: Runner, image: str) -> None:
@@ -609,9 +611,9 @@ def _upgrade_plan(cfg: Config, components: list[str]) -> list[str]:
                      f"(operator chart {cfg.operator_version})")
     if "monitoring" in components:
         lines.append(f"Monitoring: helm upgrade stack to {c.MONITORING_VERSION}")
-    if "demo" in components:
-        lines.append("Demo: re-apply manifests for the deployed demo components"
-                     + (f" + {', '.join(cfg.demo)}" if cfg.demo else "")
+    if "addons" in components:
+        lines.append("Add-ons: re-apply manifests for the deployed add-ons"
+                     + (f" + {', '.join(cfg.addons)}" if cfg.addons else "")
                      + " (data is kept)")
     return lines
 
@@ -660,8 +662,8 @@ def cmd_upgrade(runner: Runner, cfg: Config) -> None:
         _upgrade_materialize(runner, cfg)
     if "monitoring" in components:
         _upgrade_monitoring(runner, cfg)
-    if "demo" in components:
-        _upgrade_demo(runner, cfg)
+    if "addons" in components:
+        _upgrade_addons(runner, cfg)
 
     print()
     log.info("Upgrade complete.")
@@ -1353,15 +1355,17 @@ def _print_success_install(cfg: Config) -> None:
         log.info("  GRAFANA=$(kubectl -n monitoring get svc -o name | grep grafana | "
                  "head -1)")
         log.info("  kubectl port-forward -n monitoring $GRAFANA 3000:80")
-    if cfg.demo:
-        log.info(f"Demo components (namespace {demo.NAMESPACE}):")
-        for comp in cfg.demo:
-            for line in demo.endpoint_lines(comp):
+    if cfg.addons:
+        log.info(f"Add-ons (namespace {addons.NAMESPACE}):")
+        for comp in cfg.addons:
+            for line in addons.endpoint_lines(comp):
                 log.info(f"  {line}")
         log.info("Connect Materialize to them (SQL files in this directory):")
-        for comp in cfg.demo:
+        for comp in cfg.addons:
             log.info(f"  psql -h localhost -p 6875 -U materialize materialize "
-                     f"-f {demo.sql_path(comp)}")
+                     f"-f {addons.sql_path(comp, comp in cfg.demo)}")
+        if cfg.demo:
+            log.info("Demo walkthrough: DEMO.md")
 
 
 # --- dispatch ------------------------------------------------------------

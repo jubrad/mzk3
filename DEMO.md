@@ -4,6 +4,10 @@ A guided tour of Materialize on a laptop: a self-managed instance on k3d plus
 realistic upstream systems to connect it to and an Iceberg catalog to sink
 into. Everything below was run end to end against Materialize v26.40.0.
 
+This is the **seeded** flavor of mzk3's add-ons (`--install-demo`). The same
+resources deploy clean, with no demo data, via `--addon NAME`; see the README's
+"Add-ons" section for that.
+
 What you get:
 
 | Component | Role in the demo |
@@ -33,16 +37,16 @@ export MZ_LICENSE_KEY=/path/to/license.key  # or pass -l FILE to every install
 
 ## 2. Install
 
-One command creates the cluster and deploys Materialize plus all four demo
-components. Expect 5 to 10 minutes on a first run (image pulls dominate).
+One command creates the cluster and deploys Materialize plus all four add-ons
+with demo data. Expect 5 to 10 minutes on a first run (image pulls dominate).
 
 ```bash
-mzk3 install --create-cluster --demo all
+mzk3 install --create-cluster --install-demo
 ```
 
-Pick a subset with `--demo postgres --demo kafka` (or `--demo postgres,kafka`).
-`install` is idempotent, so you can add a component later with the same
-command. Add `--install-dashboards` for Grafana.
+Pick a subset with `--install-demo postgres,kafka` (repeatable). `install` is
+idempotent, so you can add one later with the same command; `--addon NAME`
+adds a clean one instead. Add `--install-dashboards` for Grafana.
 
 When it finishes, the banner lists the endpoints and the SQL files it wrote
 into the current directory:
@@ -55,10 +59,10 @@ Check that everything is up:
 
 ```bash
 mzk3 status
-kubectl get pods -n demo
+kubectl get pods -n addons
 ```
 
-All demo pods should be `Running` (the `redpanda-seed` job shows `Completed`).
+All add-on pods should be `Running` (the `redpanda-seed` job shows `Completed`).
 
 ## 3. Connect to Materialize
 
@@ -102,9 +106,9 @@ Now change the upstream database from another terminal and re-run the query,
 or leave `\watch 1` running in psql to see it update live:
 
 ```bash
-kubectl exec -n demo deploy/postgres -- psql -U postgres -d demo \
+kubectl exec -n addons deploy/postgres -- psql -U postgres -d app \
   -c "INSERT INTO orders (customer_id, amount, status) VALUES (2, 42.00, 'new');"
-kubectl exec -n demo deploy/postgres -- psql -U postgres -d demo \
+kubectl exec -n addons deploy/postgres -- psql -U postgres -d app \
   -c "UPDATE orders SET status = 'shipped' WHERE status = 'new';"
 ```
 
@@ -124,7 +128,7 @@ Same shape as Postgres: a MySQL connection, a source, and `mysql_customers` /
 (`gtid_mode=ON`, `binlog_row_metadata=FULL`, a `materialize` replication user).
 
 ```bash
-kubectl exec -n demo deploy/mysql -- mysql -uroot -pmysql demo \
+kubectl exec -n addons deploy/mysql -- mysql -uroot -pmysql app \
   -e "INSERT INTO orders (customer_id, amount, status) VALUES (2, 42.00, 'new');"
 ```
 
@@ -146,10 +150,10 @@ writes that view back to Redpanda as upsert JSON.
 Produce a record with a new key (an insert) and then reuse a key (an update):
 
 ```bash
-kubectl exec -n demo deploy/redpanda -- sh -c \
+kubectl exec -n addons deploy/redpanda -- sh -c \
   'echo "6 {\"id\":6,\"customer_id\":1,\"amount\":9.99,\"status\":\"new\"}" \
    | rpk topic produce demo_orders -f "%k %v\n"'
-kubectl exec -n demo deploy/redpanda -- sh -c \
+kubectl exec -n addons deploy/redpanda -- sh -c \
   'echo "6 {\"id\":6,\"customer_id\":1,\"amount\":9.99,\"status\":\"paid\"}" \
    | rpk topic produce demo_orders -f "%k %v\n"'
 ```
@@ -162,7 +166,7 @@ SELECT * FROM orders_by_status;
 And read the sink's output topic to show the round trip:
 
 ```bash
-kubectl exec -n demo deploy/redpanda -- rpk topic consume orders_by_status -n 4 -f '%k -> %v\n'
+kubectl exec -n addons deploy/redpanda -- rpk topic consume orders_by_status -n 4 -f '%k -> %v\n'
 ```
 
 ## 7. Iceberg: sink to a lakehouse table
@@ -172,7 +176,7 @@ psql -h localhost -p 6875 -U materialize materialize -f demo-iceberg.sql
 ```
 
 This creates an Iceberg catalog connection to Polaris (`CATALOG TYPE = 'rest'`,
-warehouse `demo`), a small input table, and two sinks into the `demo`
+warehouse `lakehouse`), a small input table, and two sinks into the `app`
 namespace:
 
 - `iceberg_orders_log`: **append** mode, every change becomes a row with
@@ -190,12 +194,12 @@ UPDATE iceberg_demo_orders SET status = 'shipped' WHERE id = 2;
 Show the tables in the catalog:
 
 ```bash
-kubectl port-forward -n demo svc/iceberg-catalog 8181:8181 &
+kubectl port-forward -n addons svc/iceberg-catalog 8181:8181 &
 TOKEN=$(curl -s -X POST localhost:8181/api/catalog/v1/oauth/tokens \
   -d 'grant_type=client_credentials&client_id=root&client_secret=root&scope=PRINCIPAL_ROLE:ALL' \
   | sed 's/.*"access_token":"\([^"]*\)".*/\1/')
 curl -s -H "Authorization: Bearer $TOKEN" \
-  localhost:8181/api/catalog/v1/demo/namespaces/demo/tables
+  localhost:8181/api/catalog/v1/lakehouse/namespaces/app/tables
 ```
 
 And the Parquet data, delete files, and snapshots in object storage:
@@ -203,13 +207,13 @@ And the Parquet data, delete files, and snapshots in object storage:
 ```bash
 kubectl run -n materialize mc --rm -i --restart=Never --image=minio/mc --command -- sh -c \
   'mc alias set r http://rustfs-io.materialize.svc.cluster.local:9000 minioadmin minioadmin \
-   && mc ls -r r/iceberg/demo/'
+   && mc ls -r r/iceberg/app/'
 ```
 
 Talking points: Polaris is the same REST catalog Materialize's own Iceberg
 tests run against, and RustFS stands in for S3. Any Iceberg reader (Spark,
-Trino, DuckDB, pyiceberg) pointed at `http://iceberg-catalog.demo.svc.cluster.local:8181/api/catalog`
-with credential `root:root` can query the tables.
+Trino, DuckDB, pyiceberg) pointed at `http://iceberg-catalog.addons.svc.cluster.local:8181/api/catalog`
+with credential `root:root` (warehouse `lakehouse`) can query the tables.
 
 ## 8. Putting it together
 
@@ -238,27 +242,28 @@ Produce another Kafka record or rename a customer in Postgres and watch
 | Goal | Command |
 |------|---------|
 | Drop everything you created in Materialize, keep the upstreams | `DROP SOURCE demo_pg_src CASCADE;` etc., or `mzk3 destroy-environment --yes` then `mzk3 recreate-environment --yes` |
-| Re-apply the demo manifests (pinned images) | `mzk3 upgrade --component demo` |
-| Re-seed a demo database from scratch | `kubectl delete -n demo deploy/postgres pvc/postgres-data` then `mzk3 upgrade --component demo` (same for `mysql`/`mysql-data`) |
-| Re-seed the Kafka topic | `kubectl exec -n demo deploy/redpanda -- rpk topic delete demo_orders` then `mzk3 upgrade --component demo` |
+| Re-apply the add-on manifests (pinned images, same flavors) | `mzk3 upgrade --component addons` |
+| Re-seed a demo database from scratch | `kubectl delete -n addons deploy/postgres pvc/postgres-data` then `mzk3 upgrade --component addons` (same for `mysql`/`mysql-data`) |
+| Re-seed the Kafka topic | `kubectl exec -n addons deploy/redpanda -- rpk topic delete demo_orders` then `mzk3 upgrade --component addons` |
+| Swap a seeded add-on for a clean one | delete its deployment + PVC as above, then `mzk3 upgrade --component addons --addon NAME` |
 | Tear down the whole cluster | `k3d cluster delete mzk3-cluster` |
 
-The demo PostgreSQL, MySQL, Redpanda, and Polaris metastore are all PVC-backed,
+The add-on PostgreSQL, MySQL, Redpanda, and Polaris metastore are all PVC-backed,
 so data and Iceberg table metadata survive pod restarts and laptop reboots.
 
 ## 10. Troubleshooting
 
 - **A source is not `running`.** `SELECT name, status, error FROM
   mz_internal.mz_source_statuses;` shows the reason. Upstream pods:
-  `kubectl get pods -n demo` and `kubectl logs -n demo deploy/<name>`.
+  `kubectl get pods -n addons` and `kubectl logs -n addons deploy/<name>`.
 - **Nothing in `materialize-environment`.** The instance needs a valid
   license key; `kubectl logs -n materialize deploy/my-materialize-operator`
   shows the rejection. Re-run install with `-l FILE`.
-- **Iceberg sink stuck.** `kubectl logs -n demo deploy/iceberg-catalog -c
+- **Iceberg sink stuck.** `kubectl logs -n addons deploy/iceberg-catalog -c
   polaris` for catalog errors and `-c setup` for the catalog/namespace
-  bootstrap. The sink needs the `demo` catalog and namespace to exist; the
-  `setup` sidecar recreates them if missing.
-- **Seed job did not run.** `kubectl logs -n demo job/redpanda-seed`. It only
+  bootstrap. The sink needs the `lakehouse` catalog and `app` namespace to
+  exist; the `setup` sidecar recreates them if missing.
+- **Seed job did not run.** `kubectl logs -n addons job/redpanda-seed`. It only
   seeds a brand-new topic.
 - **environmentd or a clusterd pod shows a restart after the laptop slept.**
   Expected. When the machine suspends, persist read leases expire and the
@@ -266,15 +271,15 @@ so data and Iceberg table metadata survive pod restarts and laptop reboots.
   the listen frontier` in the previous container's log), then comes back
   within a minute with sources and sinks intact. Reconnect psql and carry on.
 - **Slow laptop.** Resource requests are in the README's config-file section
-  (`resources.demo-*`); Redpanda and Polaris are the heaviest.
+  (`resources.addon-*`); Redpanda and Polaris are the heaviest.
 
 ## Reference
 
 | Component | In-cluster endpoint | Credentials |
 |-----------|---------------------|-------------|
-| PostgreSQL | `postgres.demo.svc.cluster.local:5432`, db `demo` | `materialize` / `materialize` (admin `postgres` / `postgres`) |
-| MySQL | `mysql.demo.svc.cluster.local:3306`, db `demo` | `materialize` / `materialize` (`root` / `mysql`) |
-| Redpanda | `redpanda.demo.svc.cluster.local:9092` (PLAINTEXT), schema registry `:8081` | none |
-| Polaris | `http://iceberg-catalog.demo.svc.cluster.local:8181/api/catalog`, warehouse `demo`, namespace `demo` | client credential `root:root`, scope `PRINCIPAL_ROLE:ALL` |
+| PostgreSQL | `postgres.addons.svc.cluster.local:5432`, db `app` | `materialize` / `materialize` (admin `postgres` / `postgres`) |
+| MySQL | `mysql.addons.svc.cluster.local:3306`, db `app` | `materialize` / `materialize` (`root` / `mysql`) |
+| Redpanda | `redpanda.addons.svc.cluster.local:9092` (PLAINTEXT), schema registry `:8081` | none |
+| Polaris | `http://iceberg-catalog.addons.svc.cluster.local:8181/api/catalog`, warehouse `lakehouse`, namespace `app` | client credential `root:root`, scope `PRINCIPAL_ROLE:ALL` |
 | RustFS (S3) | `http://rustfs-io.materialize.svc.cluster.local:9000`, bucket `iceberg` | `minioadmin` / `minioadmin` |
 | Materialize | balancerd `:6875` (SQL), console `:8080` | any user name, no password |

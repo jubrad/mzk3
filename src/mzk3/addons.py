@@ -1,28 +1,34 @@
-"""Optional demo infrastructure deployed next to Materialize (`--demo`).
+"""Optional add-ons deployed next to Materialize (`--addon`, `--install-demo`).
 
-A fresh install has nothing to connect to. These components give a demo
-environment realistic upstream systems -- and an Iceberg catalog to sink into --
-so people can exercise sources/sinks the way they would against their own stack:
+A fresh install has nothing to connect to. These add-ons give an environment
+realistic upstream systems -- and an Iceberg catalog to sink into -- so people
+can exercise sources/sinks the way they would against their own stack:
 
-- postgres  PostgreSQL 16 with logical replication (wal_level=logical, a
-            `mz_source` publication, a `materialize` replication user) and a
-            small seeded schema (customers / orders).
-- mysql     MySQL 8.4 with GTID-based binlog replication
-            (binlog_row_metadata=FULL, a `materialize` replication user) and the
-            same seeded schema.
+- postgres  PostgreSQL 16 ready for logical replication (wal_level=logical, a
+            `materialize` replication user, an `mz_source` publication FOR ALL
+            TABLES, an empty `app` database).
+- mysql     MySQL 8.4 ready for GTID binlog replication (binlog_row_metadata=
+            FULL, a `materialize` replication user, an empty `app` database).
 - kafka     Redpanda (Kafka API on 9092, schema registry on 8081, HTTP proxy on
-            8082) with a seeded `demo_orders` topic of keyed JSON records.
+            8082), topics auto-created.
 - iceberg   Apache Polaris, an Iceberg REST catalog, with its warehouse on the
-            in-cluster RustFS (S3) in a dedicated `iceberg` bucket. Polaris
-            persists to its own small Postgres so tables survive restarts.
-            Materialize's Iceberg sink talks to it as a `rest` catalog.
+            in-cluster RustFS (S3) in a dedicated `iceberg` bucket: catalog
+            `lakehouse`, namespace `app`. Polaris persists to its own small
+            Postgres so tables survive restarts. Materialize's Iceberg sink
+            talks to it as a `rest` catalog.
 
-Everything lives in the `demo` namespace, uses fixed throwaway credentials, and
-is PVC-backed so it survives pod restarts. Each component also produces a
-`demo-<name>.sql` file with the Materialize statements that connect to it.
+`--addon NAME` deploys them **clean**: bring your own schema and topics, and use
+the generated `addon-<name>.sql` for the matching `CREATE CONNECTION`.
+`--install-demo [NAME]` deploys the same add-ons **seeded** with demo data
+(customers/orders tables, a keyed JSON `demo_orders` topic) and writes a
+`demo-<name>.sql` walkthrough of sources, views and sinks (see DEMO.md). Which
+flavor a deployed add-on has is recorded in a label so `upgrade` re-applies it
+unchanged.
 
-The manifest/SQL builders are pure (string in, string out) so they're unit
-testable; `install` is the only function that touches the cluster.
+Everything lives in the `addons` namespace, uses fixed throwaway credentials,
+and is PVC-backed so it survives pod restarts. The manifest/SQL builders are
+pure (string in, string out) so they're unit testable; `install` is the only
+function that touches the cluster.
 """
 
 from __future__ import annotations
@@ -33,10 +39,13 @@ from pathlib import Path
 
 from . import commands as c
 from . import log
-from .config import DEFAULT_RESOURCES, Config
+from .config import ADDONS, DEFAULT_RESOURCES, Config
 from .runner import Runner
 
-NAMESPACE = "demo"
+NAMESPACE = "addons"
+# Label on each add-on Deployment recording whether it was seeded with demo
+# data, so re-applies (upgrade) keep the same flavor.
+DEMO_LABEL = "mzk3.io/demo"
 
 POSTGRES_IMAGE = "postgres:16.15"
 MYSQL_IMAGE = "mysql:8.4.11"
@@ -48,25 +57,26 @@ POLARIS_ADMIN_IMAGE = f"apache/polaris-admin-tool:{POLARIS_VERSION}"
 CURL_IMAGE = "curlimages/curl:8.14.1"
 MC_IMAGE = c.MC_IMAGE
 
-# Throwaway demo credentials. Materialize connects with the `materialize` user.
+# Throwaway credentials. Materialize connects with the `materialize` user.
+DB_NAME = "app"
 PG_ADMIN_PASSWORD = "postgres"
 MYSQL_ROOT_PASSWORD = "mysql"
 MZ_USER = "materialize"
 MZ_PASSWORD = "materialize"
 
-KAFKA_TOPIC = "demo_orders"
+KAFKA_TOPIC = "demo_orders"  # seeded by --install-demo only
 
 # Polaris: realm/root credential (client_id:client_secret), the catalog
-# (Materialize's WAREHOUSE) and the namespace the demo sink writes into.
+# (Materialize's WAREHOUSE) and the namespace sinks write into.
 POLARIS_REALM = "POLARIS"
 POLARIS_CREDENTIAL = "root:root"
-ICEBERG_CATALOG = "demo"
-ICEBERG_NAMESPACE = "demo"
+ICEBERG_CATALOG = "lakehouse"
+ICEBERG_NAMESPACE = "app"
 ICEBERG_BUCKET = "iceberg"
 RUSTFS_S3_URL = f"http://{c.RUSTFS_S3_HOST}:9000"
 
-# Kubernetes Deployments each component consists of (readiness is waited on
-# each), and the one whose presence means "this component is installed".
+# Kubernetes Deployments each add-on consists of (readiness is waited on each),
+# and the one whose presence means "this add-on is installed".
 DEPLOYMENTS: dict[str, list[str]] = {
     "postgres": ["postgres"],
     "mysql": ["mysql"],
@@ -75,7 +85,7 @@ DEPLOYMENTS: dict[str, list[str]] = {
 }
 PRIMARY_DEPLOYMENT = {comp: deps[-1] for comp, deps in DEPLOYMENTS.items()}
 
-# In-cluster hostnames Materialize uses to reach each component.
+# In-cluster hostnames Materialize uses to reach each add-on.
 HOSTS = {
     "postgres": f"postgres.{NAMESPACE}.svc.cluster.local",
     "mysql": f"mysql.{NAMESPACE}.svc.cluster.local",
@@ -92,7 +102,7 @@ def _indent(text: str, n: int) -> str:
 
 
 def _res(cfg: Config, key: str) -> tuple[str, str]:
-    """(cpu, memory) for a component: config-file override or the default."""
+    """(cpu, memory) for an add-on: config-file override or the default."""
     r = {**DEFAULT_RESOURCES.get(key, {}), **cfg.resources.get(key, {})}
     return r["cpu"], r["memory"]
 
@@ -116,6 +126,10 @@ def memory_mb(quantity: str) -> int:
         "T": 1e12 / 2**20, "Ti": 2**20,
     }[unit]
     return int(num * scale)
+
+
+def _flavor(seed: bool) -> str:
+    return "true" if seed else "false"
 
 
 _NAMESPACE_YAML = f"""\
@@ -161,7 +175,7 @@ spec:
 """
 
 
-# --- seeded schema (shared by postgres + mysql) --------------------------
+# --- seeded demo schema (shared by postgres + mysql) ---------------------
 
 _CUSTOMERS = [
     ("Ada Lovelace", "ada@example.com"),
@@ -185,13 +199,23 @@ def _seed_rows() -> tuple[str, str]:
 
 # --- postgres ------------------------------------------------------------
 
-def _postgres_init_sql() -> str:
-    customers, orders = _seed_rows()
-    return f"""\
+def _postgres_init_sql(seed: bool) -> str:
+    setup = f"""\
 -- Runs once, when the data directory is first initialised.
 -- Replication user for Materialize (needs REPLICATION for logical decoding).
 CREATE ROLE {MZ_USER} WITH LOGIN REPLICATION PASSWORD '{MZ_PASSWORD}';
-
+GRANT CONNECT ON DATABASE {DB_NAME} TO {MZ_USER};
+GRANT USAGE ON SCHEMA public TO {MZ_USER};
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO {MZ_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO {MZ_USER};
+-- Publication for Materialize; covers tables created later too.
+CREATE PUBLICATION mz_source FOR ALL TABLES;
+"""
+    if not seed:
+        return setup
+    customers, orders = _seed_rows()
+    return setup + f"""
+-- Demo data.
 CREATE TABLE customers (
   id         serial PRIMARY KEY,
   name       text NOT NULL,
@@ -211,18 +235,11 @@ ALTER TABLE orders REPLICA IDENTITY FULL;
 
 INSERT INTO customers (name, email) VALUES {customers};
 INSERT INTO orders (customer_id, amount, status) VALUES {orders};
-
-CREATE PUBLICATION mz_source FOR ALL TABLES;
-
-GRANT CONNECT ON DATABASE demo TO {MZ_USER};
-GRANT USAGE ON SCHEMA public TO {MZ_USER};
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO {MZ_USER};
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO {MZ_USER};
 """
 
 
-def postgres_manifest(cfg: Config) -> str:
-    cpu, mem = _res(cfg, "demo-postgres")
+def postgres_manifest(cfg: Config, seed: bool = False) -> str:
+    cpu, mem = _res(cfg, "addon-postgres")
     return f"""\
 {_NAMESPACE_YAML}---
 apiVersion: v1
@@ -232,13 +249,15 @@ metadata:
   namespace: {NAMESPACE}
 data:
   01-init.sql: |
-{_indent(_postgres_init_sql(), 4)}
+{_indent(_postgres_init_sql(seed), 4)}
 {_pvc("postgres-data", "5Gi")}---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
   namespace: {NAMESPACE}
+  labels:
+    {DEMO_LABEL}: "{_flavor(seed)}"
 spec:
   replicas: 1
   strategy:
@@ -268,7 +287,7 @@ spec:
         - name: POSTGRES_PASSWORD
           value: "{PG_ADMIN_PASSWORD}"
         - name: POSTGRES_DB
-          value: demo
+          value: {DB_NAME}
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
         ports:
@@ -276,7 +295,7 @@ spec:
           name: postgres
         readinessProbe:
           exec:
-            command: ["pg_isready", "-U", "postgres", "-d", "demo"]
+            command: ["pg_isready", "-U", "postgres", "-d", "{DB_NAME}"]
           initialDelaySeconds: 5
           periodSeconds: 5
         {_indent(_resources_yaml(cpu, mem), 8).lstrip()}
@@ -296,12 +315,45 @@ spec:
 {_service("postgres", [("postgres", 5432)])}"""
 
 
-def postgres_sql() -> str:
+def _psql_hint(sql_file: str) -> str:
+    return (f"--   psql -h localhost -p 6875 -U materialize materialize -f {sql_file}\n"
+            "-- (port-forward balancerd first; see README \"Accessing Materialize\")")
+
+
+def postgres_addon_sql() -> str:
+    host = HOSTS["postgres"]
+    return f"""\
+-- Materialize -> PostgreSQL add-on (namespace {NAMESPACE}), via logical replication.
+-- The server has wal_level=logical, a `{MZ_USER}` replication user, an empty
+-- `{DB_NAME}` database and an `mz_source` publication FOR ALL TABLES. Load your
+-- own schema first, e.g.:
+--   kubectl exec -n {NAMESPACE} deploy/postgres -- psql -U postgres -d {DB_NAME} -c "CREATE TABLE ..."
+--   kubectl port-forward -n {NAMESPACE} svc/postgres 5432:5432   # then pg_restore / psql -f
+-- and give each table REPLICA IDENTITY FULL. Then run this against Materialize:
+{_psql_hint("addon-postgres.sql")}
+
+CREATE SECRET IF NOT EXISTS pg_password AS '{MZ_PASSWORD}';
+
+CREATE CONNECTION IF NOT EXISTS pg_conn TO POSTGRES (
+    HOST '{host}',
+    PORT 5432,
+    USER '{MZ_USER}',
+    PASSWORD SECRET pg_password,
+    SSL MODE 'disable',
+    DATABASE '{DB_NAME}'
+);
+
+-- CREATE SOURCE pg_src FROM POSTGRES CONNECTION pg_conn (PUBLICATION 'mz_source');
+-- CREATE TABLE my_table FROM SOURCE pg_src (REFERENCE public.my_table);
+"""
+
+
+def postgres_demo_sql() -> str:
     host = HOSTS["postgres"]
     return f"""\
 -- Materialize -> demo PostgreSQL (namespace {NAMESPACE}), via logical replication.
 -- Run against Materialize, e.g.:
---   psql -h localhost -p 6875 -U materialize materialize -f demo-postgres.sql
+{_psql_hint("demo-postgres.sql")}
 
 CREATE SECRET IF NOT EXISTS demo_pg_password AS '{MZ_PASSWORD}';
 
@@ -311,7 +363,7 @@ CREATE CONNECTION IF NOT EXISTS demo_pg TO POSTGRES (
     USER '{MZ_USER}',
     PASSWORD SECRET demo_pg_password,
     SSL MODE 'disable',
-    DATABASE 'demo'
+    DATABASE '{DB_NAME}'
 );
 
 CREATE SOURCE IF NOT EXISTS demo_pg_src
@@ -326,24 +378,28 @@ CREATE TABLE IF NOT EXISTS pg_orders    FROM SOURCE demo_pg_src (REFERENCE publi
 --   GROUP BY c.name;
 --
 -- Then change the upstream data and watch the results move:
---   kubectl exec -n {NAMESPACE} deploy/postgres -- psql -U postgres -d demo \\
+--   kubectl exec -n {NAMESPACE} deploy/postgres -- psql -U postgres -d {DB_NAME} \\
 --     -c "INSERT INTO orders (customer_id, amount, status) VALUES (2, 42.00, 'new');"
 """
 
 
 # --- mysql ---------------------------------------------------------------
 
-def _mysql_init_sql() -> str:
-    customers, orders = _seed_rows()
-    return f"""\
+def _mysql_init_sql(seed: bool) -> str:
+    setup = f"""\
 -- Runs once, when the data directory is first initialised.
 -- Replication user for Materialize (privileges per the Materialize MySQL docs).
 CREATE USER '{MZ_USER}'@'%' IDENTIFIED BY '{MZ_PASSWORD}';
 GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT, LOCK TABLES
   ON *.* TO '{MZ_USER}'@'%';
 FLUSH PRIVILEGES;
-
-USE demo;
+"""
+    if not seed:
+        return setup
+    customers, orders = _seed_rows()
+    return setup + f"""
+-- Demo data.
+USE {DB_NAME};
 CREATE TABLE customers (
   id         INT AUTO_INCREMENT PRIMARY KEY,
   name       VARCHAR(255) NOT NULL,
@@ -363,8 +419,8 @@ INSERT INTO orders (customer_id, amount, status) VALUES {orders};
 """
 
 
-def mysql_manifest(cfg: Config) -> str:
-    cpu, mem = _res(cfg, "demo-mysql")
+def mysql_manifest(cfg: Config, seed: bool = False) -> str:
+    cpu, mem = _res(cfg, "addon-mysql")
     return f"""\
 {_NAMESPACE_YAML}---
 apiVersion: v1
@@ -374,13 +430,15 @@ metadata:
   namespace: {NAMESPACE}
 data:
   01-init.sql: |
-{_indent(_mysql_init_sql(), 4)}
+{_indent(_mysql_init_sql(seed), 4)}
 {_pvc("mysql-data", "5Gi")}---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mysql
   namespace: {NAMESPACE}
+  labels:
+    {DEMO_LABEL}: "{_flavor(seed)}"
 spec:
   replicas: 1
   strategy:
@@ -410,7 +468,7 @@ spec:
         - name: MYSQL_ROOT_PASSWORD
           value: "{MYSQL_ROOT_PASSWORD}"
         - name: MYSQL_DATABASE
-          value: demo
+          value: {DB_NAME}
         ports:
         - containerPort: 3306
           name: mysql
@@ -440,12 +498,38 @@ spec:
 {_service("mysql", [("mysql", 3306)])}"""
 
 
-def mysql_sql() -> str:
+def mysql_addon_sql() -> str:
+    host = HOSTS["mysql"]
+    return f"""\
+-- Materialize -> MySQL add-on (namespace {NAMESPACE}), via GTID binlog replication.
+-- The server has gtid_mode=ON and binlog_row_metadata=FULL, a `{MZ_USER}`
+-- replication user and an empty `{DB_NAME}` database. Load your own schema first, e.g.:
+--   kubectl exec -n {NAMESPACE} deploy/mysql -- mysql -uroot -p{MYSQL_ROOT_PASSWORD} {DB_NAME} -e "CREATE TABLE ..."
+--   kubectl port-forward -n {NAMESPACE} svc/mysql 3306:3306   # then mysql < dump.sql
+-- Then run this against Materialize:
+{_psql_hint("addon-mysql.sql")}
+
+CREATE SECRET IF NOT EXISTS mysql_password AS '{MZ_PASSWORD}';
+
+CREATE CONNECTION IF NOT EXISTS mysql_conn TO MYSQL (
+    HOST '{host}',
+    PORT 3306,
+    USER '{MZ_USER}',
+    PASSWORD SECRET mysql_password,
+    SSL MODE 'disabled'
+);
+
+-- CREATE SOURCE mysql_src FROM MYSQL CONNECTION mysql_conn;
+-- CREATE TABLE my_table FROM SOURCE mysql_src (REFERENCE {DB_NAME}.my_table);
+"""
+
+
+def mysql_demo_sql() -> str:
     host = HOSTS["mysql"]
     return f"""\
 -- Materialize -> demo MySQL (namespace {NAMESPACE}), via GTID binlog replication.
 -- Run against Materialize, e.g.:
---   psql -h localhost -p 6875 -U materialize materialize -f demo-mysql.sql
+{_psql_hint("demo-mysql.sql")}
 
 CREATE SECRET IF NOT EXISTS demo_mysql_password AS '{MZ_PASSWORD}';
 
@@ -459,8 +543,8 @@ CREATE CONNECTION IF NOT EXISTS demo_mysql TO MYSQL (
 
 CREATE SOURCE IF NOT EXISTS demo_mysql_src FROM MYSQL CONNECTION demo_mysql;
 
-CREATE TABLE IF NOT EXISTS mysql_customers FROM SOURCE demo_mysql_src (REFERENCE demo.customers);
-CREATE TABLE IF NOT EXISTS mysql_orders    FROM SOURCE demo_mysql_src (REFERENCE demo.orders);
+CREATE TABLE IF NOT EXISTS mysql_customers FROM SOURCE demo_mysql_src (REFERENCE {DB_NAME}.customers);
+CREATE TABLE IF NOT EXISTS mysql_orders    FROM SOURCE demo_mysql_src (REFERENCE {DB_NAME}.orders);
 
 -- Try it:
 --   SELECT c.name, count(*) AS orders, sum(o.amount) AS total
@@ -468,7 +552,7 @@ CREATE TABLE IF NOT EXISTS mysql_orders    FROM SOURCE demo_mysql_src (REFERENCE
 --   GROUP BY c.name;
 --
 -- Then change the upstream data and watch the results move:
---   kubectl exec -n {NAMESPACE} deploy/mysql -- mysql -uroot -p{MYSQL_ROOT_PASSWORD} demo \\
+--   kubectl exec -n {NAMESPACE} deploy/mysql -- mysql -uroot -p{MYSQL_ROOT_PASSWORD} {DB_NAME} \\
 --     -e "INSERT INTO orders (customer_id, amount, status) VALUES (2, 42.00, 'new');"
 """
 
@@ -505,8 +589,34 @@ fi
 """
 
 
-def kafka_manifest(cfg: Config) -> str:
-    cpu, mem = _res(cfg, "demo-kafka")
+SEED_JOB = "redpanda-seed"
+
+
+def _kafka_seed_job() -> str:
+    return f"""\
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {SEED_JOB}
+  namespace: {NAMESPACE}
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: seed
+        image: {REDPANDA_IMAGE}
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+{_indent(_kafka_seed_script(), 10)}
+"""
+
+
+def kafka_manifest(cfg: Config, seed: bool = False) -> str:
+    cpu, mem = _res(cfg, "addon-kafka")
     host = HOSTS["kafka"]
     # Leave the container headroom over what Redpanda pins for itself.
     rp_mem = max(256, int(memory_mb(mem) * 0.75))
@@ -517,6 +627,8 @@ kind: Deployment
 metadata:
   name: redpanda
   namespace: {NAMESPACE}
+  labels:
+    {DEMO_LABEL}: "{_flavor(seed)}"
 spec:
   replicas: 1
   strategy:
@@ -578,33 +690,41 @@ spec:
         persistentVolumeClaim:
           claimName: redpanda-data
 {_service("redpanda", [("kafka", 9092), ("schema-registry", 8081),
-                       ("pandaproxy", 8082), ("admin", 9644)])}---
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: redpanda-seed
-  namespace: {NAMESPACE}
-spec:
-  backoffLimit: 10
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-      - name: seed
-        image: {REDPANDA_IMAGE}
-        command: ["/bin/bash", "-c"]
-        args:
-        - |
-{_indent(_kafka_seed_script(), 10)}
+                       ("pandaproxy", 8082), ("admin", 9644)])}{_kafka_seed_job() if seed else ""}"""
+
+
+def kafka_addon_sql() -> str:
+    host = HOSTS["kafka"]
+    return f"""\
+-- Materialize <-> Redpanda add-on (namespace {NAMESPACE}): Kafka API on 9092
+-- (PLAINTEXT, topics auto-created), Confluent-compatible schema registry on 8081.
+-- Produce your own data, e.g.:
+--   kubectl exec -n {NAMESPACE} deploy/redpanda -- sh -c 'echo "k1 {{\\"hello\\":\\"world\\"}}" | rpk topic produce my_topic -f "%k %v\\n"'
+-- Then run this against Materialize:
+{_psql_hint("addon-kafka.sql")}
+
+CREATE CONNECTION IF NOT EXISTS kafka_conn TO KAFKA (
+    BROKER '{host}:9092',
+    SECURITY PROTOCOL = 'PLAINTEXT'
+);
+
+CREATE CONNECTION IF NOT EXISTS csr_conn TO CONFLUENT SCHEMA REGISTRY (
+    URL 'http://{host}:8081'
+);
+
+-- CREATE SOURCE my_src FROM KAFKA CONNECTION kafka_conn (TOPIC 'my_topic');
+-- CREATE TABLE my_table FROM SOURCE my_src KEY FORMAT TEXT VALUE FORMAT JSON ENVELOPE UPSERT;
+-- CREATE SINK my_sink FROM my_view INTO KAFKA CONNECTION kafka_conn (TOPIC 'my_out')
+--   KEY (id) FORMAT JSON ENVELOPE UPSERT;
 """
 
 
-def kafka_sql() -> str:
+def kafka_demo_sql() -> str:
     host = HOSTS["kafka"]
     return f"""\
 -- Materialize <-> demo Redpanda (namespace {NAMESPACE}): Kafka API on 9092,
 -- Confluent-compatible schema registry on 8081. Run against Materialize, e.g.:
---   psql -h localhost -p 6875 -U materialize materialize -f demo-kafka.sql
+{_psql_hint("demo-kafka.sql")}
 
 CREATE CONNECTION IF NOT EXISTS demo_kafka TO KAFKA (
     BROKER '{host}:9092',
@@ -657,7 +777,7 @@ CREATE SINK IF NOT EXISTS orders_by_status_sink
 # --- iceberg (polaris on rustfs) ----------------------------------------
 
 def polaris_catalog_payload() -> dict:
-    """Polaris management-API body creating the demo catalog on RustFS.
+    """Polaris management-API body creating the catalog on RustFS.
 
     Catalog `properties` are handed to clients verbatim on loadTable, which is
     how Materialize's Iceberg sink learns the S3 endpoint + static credentials
@@ -687,8 +807,8 @@ def polaris_catalog_payload() -> dict:
 
 
 def _polaris_setup_script() -> str:
-    """Sidecar loop: once Polaris is up, make sure the demo catalog and
-    namespace exist (idempotent, so it also heals after a restart)."""
+    """Sidecar loop: once Polaris is up, make sure the catalog and namespace
+    exist (idempotent, so it also heals after a restart)."""
     client_id, client_secret = POLARIS_CREDENTIAL.split(":", 1)
     payload = json.dumps(polaris_catalog_payload(), separators=(",", ":"))
     return f"""\
@@ -731,9 +851,11 @@ polaris.readiness.ignore-severe-issues=true
 """
 
 
-def iceberg_manifest(cfg: Config) -> str:
-    cpu, mem = _res(cfg, "demo-iceberg")
-    db_cpu, db_mem = _res(cfg, "demo-iceberg-db")
+def iceberg_manifest(cfg: Config, seed: bool = False) -> str:
+    # Nothing to seed here: demo data for Iceberg lives on the Materialize side
+    # (demo-iceberg.sql). The flavor label is still recorded for consistency.
+    cpu, mem = _res(cfg, "addon-iceberg")
+    db_cpu, db_mem = _res(cfg, "addon-iceberg-db")
     jdbc_url = f"jdbc:postgresql://iceberg-catalog-db.{NAMESPACE}.svc.cluster.local:5432/polaris"
     realm, root_id, root_secret = POLARIS_REALM, *POLARIS_CREDENTIAL.split(":", 1)
     datasource_env = f"""\
@@ -769,6 +891,8 @@ kind: Deployment
 metadata:
   name: iceberg-catalog-db
   namespace: {NAMESPACE}
+  labels:
+    {DEMO_LABEL}: "{_flavor(seed)}"
 spec:
   replicas: 1
   strategy:
@@ -824,6 +948,8 @@ kind: Deployment
 metadata:
   name: iceberg-catalog
   namespace: {NAMESPACE}
+  labels:
+    {DEMO_LABEL}: "{_flavor(seed)}"
 spec:
   replicas: 1
   selector:
@@ -889,8 +1015,8 @@ spec:
         - name: config
           mountPath: /deployments/config
           readOnly: true
-      # Keeps the demo catalog + namespace present (creates them once Polaris
-      # is up; a no-op afterwards).
+      # Keeps the catalog + namespace present (creates them once Polaris is
+      # up; a no-op afterwards).
       - name: setup
         image: {CURL_IMAGE}
         command: ["/bin/sh", "-c"]
@@ -910,14 +1036,53 @@ spec:
 {_service("iceberg-catalog", [("api", 8181), ("management", 8182)])}"""
 
 
-def iceberg_sql() -> str:
+def _iceberg_inspect_hints() -> str:
+    return f"""\
+-- Inspect the catalog (tables in the `{ICEBERG_NAMESPACE}` namespace):
+--   kubectl port-forward -n {NAMESPACE} svc/iceberg-catalog 8181:8181
+--   TOKEN=$(curl -s -X POST localhost:8181/api/catalog/v1/oauth/tokens \\
+--     -d 'grant_type=client_credentials&client_id=root&client_secret=root&scope=PRINCIPAL_ROLE:ALL' \\
+--     | sed 's/.*"access_token":"\\([^"]*\\)".*/\\1/')
+--   curl -s -H "Authorization: Bearer $TOKEN" \\
+--     localhost:8181/api/catalog/v1/{ICEBERG_CATALOG}/namespaces/{ICEBERG_NAMESPACE}/tables
+-- ...and the Parquet/metadata files in RustFS:
+--   kubectl run -n materialize mc --rm -i --restart=Never --image={MC_IMAGE} --command -- sh -c \\
+--     'mc alias set r {RUSTFS_S3_URL} {c.RUSTFS_ACCESS_KEY} {c.RUSTFS_SECRET_KEY} && mc ls -r r/{ICEBERG_BUCKET}/'"""
+
+
+def iceberg_addon_sql() -> str:
+    host = HOSTS["iceberg"]
+    return f"""\
+-- Materialize -> Iceberg tables via the Polaris REST catalog add-on (namespace
+-- {NAMESPACE}): catalog/warehouse `{ICEBERG_CATALOG}`, namespace `{ICEBERG_NAMESPACE}`,
+-- data files in the RustFS bucket `{ICEBERG_BUCKET}`. Iceberg sinks are in public
+-- preview; REST catalogs need a recent Materialize (validated with v26.40.0).
+{_psql_hint("addon-iceberg.sql")}
+
+CREATE CONNECTION IF NOT EXISTS iceberg_conn TO ICEBERG CATALOG (
+    CATALOG TYPE = 'rest',
+    URL = 'http://{host}:8181/api/catalog',
+    CREDENTIAL = '{POLARIS_CREDENTIAL}',
+    WAREHOUSE = '{ICEBERG_CATALOG}',
+    SCOPE = 'PRINCIPAL_ROLE:ALL'
+);
+
+-- CREATE SINK my_sink FROM my_view
+--   INTO ICEBERG CATALOG CONNECTION iceberg_conn (NAMESPACE = '{ICEBERG_NAMESPACE}', TABLE = 'my_table')
+--   KEY (id) MODE UPSERT WITH (COMMIT INTERVAL = '1m');
+
+{_iceberg_inspect_hints()}
+"""
+
+
+def iceberg_demo_sql() -> str:
     host = HOSTS["iceberg"]
     return f"""\
 -- Materialize -> Iceberg tables via the demo Polaris REST catalog (namespace
 -- {NAMESPACE}), warehouse on the in-cluster RustFS bucket `{ICEBERG_BUCKET}`.
 -- Iceberg sinks are in public preview; REST catalogs like Polaris need a recent
 -- Materialize (validated with v26.40.0, mzk3's default). Run against Materialize:
---   psql -h localhost -p 6875 -U materialize materialize -f demo-iceberg.sql
+{_psql_hint("demo-iceberg.sql")}
 
 CREATE CONNECTION IF NOT EXISTS demo_iceberg TO ICEBERG CATALOG (
     CATALOG TYPE = 'rest',
@@ -965,16 +1130,7 @@ CREATE SINK IF NOT EXISTS iceberg_orders_by_status_sink
 --   SELECT name, status, error FROM mz_internal.mz_sink_statuses WHERE name LIKE 'iceberg_%';
 --   UPDATE iceberg_demo_orders SET status = 'shipped' WHERE id = 2;
 --
--- Inspect the catalog (tables in the `{ICEBERG_NAMESPACE}` namespace):
---   kubectl port-forward -n {NAMESPACE} svc/iceberg-catalog 8181:8181
---   TOKEN=$(curl -s -X POST localhost:8181/api/catalog/v1/oauth/tokens \\
---     -d 'grant_type=client_credentials&client_id=root&client_secret=root&scope=PRINCIPAL_ROLE:ALL' \\
---     | sed 's/.*"access_token":"\\([^"]*\\)".*/\\1/')
---   curl -s -H "Authorization: Bearer $TOKEN" \\
---     localhost:8181/api/catalog/v1/{ICEBERG_CATALOG}/namespaces/{ICEBERG_NAMESPACE}/tables
--- ...and the Parquet/metadata files in RustFS:
---   kubectl run -n materialize mc --rm -i --restart=Never --image=minio/mc --command -- sh -c \\
---     'mc alias set r {RUSTFS_S3_URL} {c.RUSTFS_ACCESS_KEY} {c.RUSTFS_SECRET_KEY} && mc ls -r r/{ICEBERG_BUCKET}/'
+{_iceberg_inspect_hints()}
 """
 
 
@@ -986,31 +1142,37 @@ MANIFESTS = {
     "kafka": kafka_manifest,
     "iceberg": iceberg_manifest,
 }
-SQL = {
-    "postgres": postgres_sql,
-    "mysql": mysql_sql,
-    "kafka": kafka_sql,
-    "iceberg": iceberg_sql,
+ADDON_SQL = {
+    "postgres": postgres_addon_sql,
+    "mysql": mysql_addon_sql,
+    "kafka": kafka_addon_sql,
+    "iceberg": iceberg_addon_sql,
+}
+DEMO_SQL = {
+    "postgres": postgres_demo_sql,
+    "mysql": mysql_demo_sql,
+    "kafka": kafka_demo_sql,
+    "iceberg": iceberg_demo_sql,
 }
 
 
 def manifest_path(component: str) -> str:
-    return f"demo-{component}.yaml"
+    return f"addon-{component}.yaml"
 
 
-def sql_path(component: str) -> str:
-    return f"demo-{component}.sql"
+def sql_path(component: str, seed: bool) -> str:
+    return f"{'demo' if seed else 'addon'}-{component}.sql"
 
 
 def endpoint_lines(component: str) -> list[str]:
     """Human-readable connection details for the install banner."""
     h = HOSTS[component]
     return {
-        "postgres": [f"PostgreSQL:  {h}:5432  db=demo  user={MZ_USER}/{MZ_PASSWORD}"
+        "postgres": [f"PostgreSQL:  {h}:5432  db={DB_NAME}  user={MZ_USER}/{MZ_PASSWORD}"
                      f"  (admin: postgres/{PG_ADMIN_PASSWORD})"],
-        "mysql": [f"MySQL:       {h}:3306  db=demo  user={MZ_USER}/{MZ_PASSWORD}"
+        "mysql": [f"MySQL:       {h}:3306  db={DB_NAME}  user={MZ_USER}/{MZ_PASSWORD}"
                   f"  (root/{MYSQL_ROOT_PASSWORD})"],
-        "kafka": [f"Kafka:       {h}:9092 (PLAINTEXT), topic {KAFKA_TOPIC}",
+        "kafka": [f"Kafka:       {h}:9092 (PLAINTEXT)",
                   f"Schema reg.: http://{h}:8081"],
         "iceberg": [f"Iceberg:     http://{h}:8181/api/catalog  credential "
                     f"{POLARIS_CREDENTIAL}  warehouse={ICEBERG_CATALOG}  "
@@ -1021,48 +1183,64 @@ def endpoint_lines(component: str) -> list[str]:
 
 # --- orchestration -------------------------------------------------------
 
-def present(runner: Runner) -> list[str]:
-    """Demo components currently deployed (by their Deployments)."""
-    res = runner.run(["kubectl", "get", "deployment", "-n", NAMESPACE, "-o", "name"],
-                     check=False, capture=True)
+def present(runner: Runner) -> dict[str, bool]:
+    """Deployed add-ons -> whether they were seeded with demo data."""
+    res = runner.run(
+        ["kubectl", "get", "deployment", "-n", NAMESPACE, "-o",
+         "jsonpath={range .items[*]}{.metadata.name}={.metadata.labels."
+         + DEMO_LABEL.replace(".", "\\.") + "}{\"\\n\"}{end}"],
+        check=False, capture=True)
     if not res.ok:
-        return []
-    names = {line.split("/", 1)[-1] for line in res.stdout.split()}
-    return [comp for comp, dep in PRIMARY_DEPLOYMENT.items() if dep in names]
+        return {}
+    flavors: dict[str, str] = {}
+    for line in res.stdout.split():
+        name, _, flavor = line.partition("=")
+        flavors[name] = flavor
+    return {comp: flavors[dep] == "true"
+            for comp, dep in PRIMARY_DEPLOYMENT.items() if dep in flavors}
 
 
-def install(runner: Runner, cfg: Config, components: list[str]) -> None:
-    """Apply the manifests for `components`, wait for them, write the SQL."""
+def install(runner: Runner, cfg: Config, components: list[str],
+            demo: set[str] = frozenset()) -> None:
+    """Apply the manifests for `components` (seeded where in `demo`), wait for
+    them, and write the matching SQL files."""
+    components = [comp for comp in ADDONS if comp in components]
     if not components:
         return
-    log.step(f"Deploying demo components: {', '.join(components)}...")
+    desc = ", ".join(f"{comp} (demo data)" if comp in demo else comp
+                     for comp in components)
+    log.step(f"Deploying add-ons: {desc}...")
     for comp in components:
+        seed = comp in demo
         path = manifest_path(comp)
         if not runner.dry_run:
-            Path(path).write_text(MANIFESTS[comp](cfg))
+            Path(path).write_text(MANIFESTS[comp](cfg, seed))
         if comp == "kafka":
-            # Job specs are immutable; drop the old seed job so re-applying
-            # (re-)runs it. The script itself only seeds a brand-new topic.
-            runner.run(["kubectl", "delete", "job", "redpanda-seed", "-n", NAMESPACE,
+            # Job specs are immutable; drop any old seed job so re-applying
+            # (re-)runs it when seeding (the script only seeds a brand-new
+            # topic) and leaves nothing behind when not.
+            runner.run(["kubectl", "delete", "job", SEED_JOB, "-n", NAMESPACE,
                         "--ignore-not-found"], check=False)
         runner.run(["kubectl", "apply", "-f", path])
 
-    log.info("Waiting for demo components to be ready...")
+    log.info("Waiting for add-ons to be ready...")
     for comp in components:
         for dep in DEPLOYMENTS[comp]:
             if not runner.run(["kubectl", "rollout", "status", f"deployment/{dep}",
                                "-n", NAMESPACE, "--timeout=600s"], check=False).ok:
                 log.warn(f"{dep} not ready yet. Check: kubectl get pods -n {NAMESPACE}")
-    if "kafka" in components:
+    if "kafka" in components and "kafka" in demo:
         if not runner.run(["kubectl", "wait", "--for=condition=complete",
-                           "job/redpanda-seed", "-n", NAMESPACE, "--timeout=300s"],
+                           f"job/{SEED_JOB}", "-n", NAMESPACE, "--timeout=300s"],
                           check=False).ok:
             log.warn("Topic seed job did not finish. Check: kubectl logs -n "
-                     f"{NAMESPACE} job/redpanda-seed")
+                     f"{NAMESPACE} job/{SEED_JOB}")
 
+    files = []
     for comp in components:
+        seed = comp in demo
+        files.append(sql_path(comp, seed))
         if not runner.dry_run:
-            Path(sql_path(comp)).write_text(SQL[comp]())
-    log.info("Demo components deployed: " + ", ".join(components))
-    log.info("Materialize statements to connect to them: "
-             + ", ".join(sql_path(comp) for comp in components))
+            Path(files[-1]).write_text((DEMO_SQL if seed else ADDON_SQL)[comp]())
+    log.info(f"Add-ons deployed: {desc}")
+    log.info("Materialize statements to connect to them: " + ", ".join(files))

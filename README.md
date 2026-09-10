@@ -8,8 +8,8 @@ A deployment tool for running [Materialize](https://materialize.com/) self-manag
 
 - **Create Cluster** - Create a new k3d cluster for Materialize
 - **Install** - Deploy Materialize with all required dependencies
-- **Demo components** - Optionally deploy PostgreSQL, MySQL, Redpanda (Kafka)
-  and an Iceberg REST catalog next to it, seeded and ready to connect to
+- **Add-ons** - Optionally deploy PostgreSQL, MySQL, Redpanda (Kafka) and an
+  Iceberg REST catalog next to it, clean or seeded with demo data
 - **Upgrade** - Upgrade to a new Materialize version with controlled rollouts
 - **Reset** - Destroy and recreate the k3d cluster
 - **Status** - Check the health of your deployment
@@ -107,9 +107,10 @@ mzk3 install -v v26.12.1
 # Install with Prometheus/Grafana monitoring
 mzk3 install --install-dashboards
 
-# Add demo upstream systems + an Iceberg catalog to connect Materialize to
-mzk3 install --demo postgres --demo kafka
-mzk3 install --demo all
+# Add upstream systems / an Iceberg catalog to connect Materialize to (clean)
+mzk3 install --addon postgres --addon kafka
+# ...or the same, seeded with demo data + a SQL walkthrough (see DEMO.md)
+mzk3 install --install-demo
 
 # Combine options
 mzk3 install -v v26.12.1 --license-key /path/to/license.key --install-dashboards
@@ -148,8 +149,8 @@ mzk3 install [options]
 ### upgrade
 
 Upgrade an existing deployment. By default it updates **all installed
-components** (Materialize, monitoring, RustFS, postgres, demo components);
-scope it with `--component` (repeatable).
+components** (Materialize, monitoring, RustFS, postgres, add-ons); scope it
+with `--component` (repeatable).
 
 ```bash
 mzk3 upgrade -v v26.12.1          # all components, Materialize -> v26.12.1
@@ -172,8 +173,9 @@ mzk3 upgrade -v v26.12.1 -y       # skip the confirmation prompt
 - **PostgreSQL**: pre-pulls the target image, then does a rolling swap
   (brief metadata downtime; true zero-downtime would need replication).
 - **RustFS / monitoring**: helm-upgraded to the versions this mzk3 ships.
-- **Demo components**: manifests re-applied (image versions pinned by this
-  mzk3); PVC-backed data is kept. `--demo NAME` alongside adds a new one.
+- **Add-ons**: manifests re-applied (image versions pinned by this mzk3),
+  each keeping its clean/seeded flavor; PVC-backed data is kept. `--addon NAME`
+  or `--install-demo NAME` alongside adds a new one.
 
 ### Development: local charts and custom images
 
@@ -266,7 +268,8 @@ mzk3 list-versions
 | `-l, --license-key` | `MZ_LICENSE_KEY` | - | Path to license key file (**required** for install / recreate-environment) |
 | `-c, --cluster` | `K3D_CLUSTER_NAME` | `mzk3-cluster` | k3d cluster name |
 | `--install-dashboards` | `MZ_INSTALL_DASHBOARDS` | `false` | Install upstream materialize-monitoring stack |
-| `--demo` | `MZ_DEMO` | - | Demo components to deploy: `postgres`, `mysql`, `kafka`, `iceberg`, `all` (repeatable / comma-separated) |
+| `--addon` | `MZ_ADDONS` | - | Add-ons to deploy clean: `postgres`, `mysql`, `kafka`, `iceberg`, `all` (repeatable / comma-separated) |
+| `--install-demo [NAME]` | `MZ_INSTALL_DEMO` | - | Add-ons to deploy **with demo data** + SQL walkthrough (bare flag = `all`) |
 | `--config` | `MZ_CONFIG` | - | Path to a JSON config file (see below) |
 | `--create-cluster` | - | `false` | Create k3d cluster before install |
 | `--force` | - | `false` | Force operation (upgrade: forceRollout; install: bypass cluster check) |
@@ -283,11 +286,12 @@ flags.
 {
   "version": "v26.30.0",
   "install_dashboards": true,
-  "demo": ["postgres", "kafka"],
+  "addons": ["postgres"],
+  "install_demo": ["kafka"],
   "resources": {
     "environmentd": {"cpu": "2", "memory": "4Gi"},
     "rustfs":       {"cpu": "1", "memory": "1Gi"},
-    "demo-kafka":   {"cpu": "1", "memory": "2Gi"}
+    "addon-kafka":  {"cpu": "1", "memory": "2Gi"}
   }
 }
 ```
@@ -316,10 +320,10 @@ reproducible; nothing floats on `latest`. Bump these constants to move:
 | MinIO client (persist wipe, bucket setup) | `MC_IMAGE` (`commands.py`) | `minio/mc:RELEASE.2025-08-13T08-35-41Z` |
 | metrics-server chart | `METRICS_SERVER_CHART_VERSION` (`commands.py`) | `3.14.0` |
 | materialize-monitoring | `MONITORING_VERSION` (`commands.py`) | `v0.6.0` |
-| Demo PostgreSQL / MySQL | `POSTGRES_IMAGE`, `MYSQL_IMAGE` (`demo.py`) | `postgres:16.15`, `mysql:8.4.11` |
-| Demo Redpanda | `REDPANDA_IMAGE` (`demo.py`) | `redpandadata/redpanda:v25.3.17` |
-| Demo Iceberg catalog | `POLARIS_VERSION` (`demo.py`) | `apache/polaris` + `polaris-admin-tool` `1.7.0` |
-| Demo helper (catalog setup sidecar) | `CURL_IMAGE` (`demo.py`) | `curlimages/curl:8.14.1` |
+| Add-on PostgreSQL / MySQL | `POSTGRES_IMAGE`, `MYSQL_IMAGE` (`addons.py`) | `postgres:16.15`, `mysql:8.4.11` |
+| Add-on Redpanda | `REDPANDA_IMAGE` (`addons.py`) | `redpandadata/redpanda:v25.3.17` |
+| Add-on Iceberg catalog | `POLARIS_VERSION` (`addons.py`) | `apache/polaris` + `polaris-admin-tool` `1.7.0` |
+| Add-on helper (catalog setup sidecar) | `CURL_IMAGE` (`addons.py`) | `curlimages/curl:8.14.1` |
 
 The Materialize metadata PostgreSQL comes from the upstream testing manifest
 for the chosen Materialize version (currently `postgres:13`), so it is pinned
@@ -359,37 +363,44 @@ From within the cluster, connect to:
 - **Hostname**: `<instance-name>-balancerd.materialize-environment.svc.cluster.local`
 - **Port**: `6875`
 
-## Demo components
+## Add-ons
 
-A bare install has nothing to connect Materialize *to*. `--demo` deploys
-realistic upstream systems (and an Iceberg catalog to sink into) so a fresh
-environment can exercise sources and sinks the way a real one would. Pick any
-subset, or `all`. **[DEMO.md](DEMO.md) is the step-by-step walkthrough** for
-giving the demo; this section is the reference.
+A bare install has nothing to connect Materialize *to*. Add-ons deploy
+realistic upstream systems (and an Iceberg catalog to sink into) next to it, in
+two flavors:
+
+- `--addon NAME` deploys the resource **clean**: configured the way Materialize
+  needs (replication on, a `materialize` user, an empty `app` database), with
+  no data. Bring your own schema, dumps, or topics.
+- `--install-demo [NAME]` deploys the same resource **seeded** with a small
+  demo dataset (customers/orders tables, a keyed JSON topic) and writes a SQL
+  walkthrough of sources, views and sinks. **[DEMO.md](DEMO.md)** is the guided
+  tour; bare `--install-demo` means all four.
 
 ```bash
-mzk3 install --create-cluster -l ./license.key --demo all
-mzk3 install -l ./license.key --demo kafka   # add one later; install is idempotent
-mzk3 upgrade --component demo                # re-apply the pinned manifests
+mzk3 install --create-cluster -l ./license.key --addon postgres,kafka   # clean
+mzk3 install --create-cluster -l ./license.key --install-demo           # demo, everything
+mzk3 install -l ./license.key --install-demo mysql --addon iceberg      # mix and match
+mzk3 upgrade --component addons        # re-apply the pinned manifests, same flavors
 ```
 
-Everything lands in the `demo` namespace with fixed throwaway credentials and
-PVC-backed storage, so data survives pod restarts. For each component mzk3
-writes a ready-to-run `demo-<name>.sql` (into the current directory) with the
-matching Materialize `CREATE CONNECTION` / `SOURCE` / `TABLE` / `SINK`
-statements, plus commands to poke the upstream side and watch results change:
+Everything lands in the `addons` namespace with fixed throwaway credentials and
+PVC-backed storage, so data survives pod restarts. Each add-on writes a SQL
+file into the current directory with the matching Materialize statements:
+`addon-<name>.sql` (connections plus commented templates) or, when seeded,
+`demo-<name>.sql` (the full walkthrough):
 
 ```bash
 kubectl port-forward -n materialize-environment "$(kubectl -n materialize-environment get svc -o name | grep balancerd)" 6875:6875
-psql -h localhost -p 6875 -U materialize materialize -f demo-postgres.sql
+psql -h localhost -p 6875 -U materialize materialize -f addon-postgres.sql
 ```
 
-| Component | What you get | In-cluster endpoint | Credentials |
-|-----------|--------------|---------------------|-------------|
-| `postgres` | PostgreSQL 16, `wal_level=logical`, publication `mz_source`, seeded `customers`/`orders` tables (`REPLICA IDENTITY FULL`) | `postgres.demo.svc.cluster.local:5432`, db `demo` | `materialize`/`materialize` (replication user); admin `postgres`/`postgres` |
-| `mysql` | MySQL 8.4 with GTID binlog replication (`binlog_row_metadata=FULL`), same seeded schema in db `demo` | `mysql.demo.svc.cluster.local:3306` | `materialize`/`materialize`; `root`/`mysql` |
-| `kafka` | Redpanda: Kafka API, Confluent-compatible schema registry, HTTP proxy; seeded topic `demo_orders` (keyed JSON) | `redpanda.demo.svc.cluster.local:9092` (PLAINTEXT), registry `:8081` | none |
-| `iceberg` | Apache Polaris Iceberg REST catalog; catalog (warehouse) `demo`, namespace `demo`, data files in RustFS bucket `iceberg` | `http://iceberg-catalog.demo.svc.cluster.local:8181/api/catalog` | OAuth2 client credential `root:root` |
+| Add-on | What you get | In-cluster endpoint | Credentials |
+|--------|--------------|---------------------|-------------|
+| `postgres` | PostgreSQL 16, `wal_level=logical`, publication `mz_source` (FOR ALL TABLES), empty db `app`; demo: seeded `customers`/`orders` (`REPLICA IDENTITY FULL`) | `postgres.addons.svc.cluster.local:5432` | `materialize`/`materialize` (replication user); admin `postgres`/`postgres` |
+| `mysql` | MySQL 8.4 with GTID binlog replication (`binlog_row_metadata=FULL`), empty db `app`; demo: same seeded schema | `mysql.addons.svc.cluster.local:3306` | `materialize`/`materialize`; `root`/`mysql` |
+| `kafka` | Redpanda: Kafka API (topics auto-created), Confluent-compatible schema registry, HTTP proxy; demo: seeded `demo_orders` topic (keyed JSON) | `redpanda.addons.svc.cluster.local:9092` (PLAINTEXT), registry `:8081` | none |
+| `iceberg` | Apache Polaris Iceberg REST catalog; catalog (warehouse) `lakehouse`, namespace `app`, data files in RustFS bucket `iceberg` | `http://iceberg-catalog.addons.svc.cluster.local:8181/api/catalog` | OAuth2 client credential `root:root` |
 
 Notes:
 
@@ -403,22 +414,23 @@ Notes:
   RustFS endpoint and credentials to the sink on table load, so no AWS
   connection is needed. Iceberg sinks are in public preview; sinking to a
   generic REST catalog needs a recent Materialize (validated with v26.40.0,
-  the default). `demo-iceberg.sql` shows append and upsert sinks and how to
-  list the resulting tables/files.
+  the default). The demo flavor differs only in the SQL it writes.
 - **Seeding.** PostgreSQL/MySQL seed on first start (docker-entrypoint init
   scripts, so only when the volume is new). Redpanda is seeded by a Job that
   creates `demo_orders` and produces five keyed JSON records; it is re-run on
-  every install/upgrade but only seeds when the topic is new.
-- **Resources.** Defaults are small (`demo-postgres` 500m/512Mi, `demo-mysql`
-  1/1Gi, `demo-kafka` 1/1Gi, `demo-iceberg` 1/1536Mi + `demo-iceberg-db`
+  every install/upgrade but only seeds when the topic is new. Each Deployment
+  carries an `mzk3.io/demo` label recording its flavor so `upgrade` re-applies
+  the same one.
+- **Resources.** Defaults are small (`addon-postgres` 500m/512Mi, `addon-mysql`
+  1/1Gi, `addon-kafka` 1/1Gi, `addon-iceberg` 1/1536Mi + `addon-iceberg-db`
   250m/256Mi) and overridable via the config file's `resources` object.
   Redpanda pins 75% of its memory limit for itself.
 - **Reachability.** The operator's network policies are off by default in the
-  k3s values, so environmentd/clusterd reach the `demo` namespace directly.
-  Everything is plaintext with fixed passwords: this is for demos, not
-  production.
-- `mzk3 status` lists the demo pods; `mzk3 upgrade` treats deployed demo
-  components as an installed component (`demo`).
+  k3s values, so environmentd/clusterd reach the `addons` namespace directly.
+  Everything is plaintext with fixed passwords: this is for local
+  development and demos, not production.
+- `mzk3 status` lists the add-on pods; `mzk3 upgrade` treats deployed add-ons
+  as an installed component (`addons`).
 
 ## Monitoring
 
@@ -501,7 +513,7 @@ Notes:
 │  └─────────────────────────────────────────────────────────────────┘│
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────────┐│
-│  │              demo namespace (optional, --demo)                   ││
+│  │        addons namespace (optional, --addon / --install-demo)     ││
 │  │  ┌────────────┐ ┌────────┐ ┌──────────┐ ┌────────────────────┐   ││
 │  │  │ PostgreSQL │ │ MySQL  │ │ Redpanda │ │ Polaris (Iceberg   │   ││
 │  │  │ (source)   │ │(source)│ │ (Kafka)  │ │ catalog -> RustFS) │   ││
