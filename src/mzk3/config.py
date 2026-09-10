@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-DEFAULT_VERSION = "v26.40.0"
+DEFAULT_VERSION = "v26.41.0"
 
 MZK3_LABEL = "created-by=mzk3"
 

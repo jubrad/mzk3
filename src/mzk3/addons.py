@@ -1056,7 +1056,7 @@ def iceberg_addon_sql() -> str:
 -- Materialize -> Iceberg tables via the Polaris REST catalog add-on (namespace
 -- {NAMESPACE}): catalog/warehouse `{ICEBERG_CATALOG}`, namespace `{ICEBERG_NAMESPACE}`,
 -- data files in the RustFS bucket `{ICEBERG_BUCKET}`. Iceberg sinks are in public
--- preview; REST catalogs need a recent Materialize (validated with v26.40.0).
+-- preview; REST catalogs need a recent Materialize (validated with v26.41.0).
 {_psql_hint("addon-iceberg.sql")}
 
 CREATE CONNECTION IF NOT EXISTS iceberg_conn TO ICEBERG CATALOG (
@@ -1081,7 +1081,7 @@ def iceberg_demo_sql() -> str:
 -- Materialize -> Iceberg tables via the demo Polaris REST catalog (namespace
 -- {NAMESPACE}), warehouse on the in-cluster RustFS bucket `{ICEBERG_BUCKET}`.
 -- Iceberg sinks are in public preview; REST catalogs like Polaris need a recent
--- Materialize (validated with v26.40.0, mzk3's default). Run against Materialize:
+-- Materialize (validated with v26.41.0, mzk3's default). Run against Materialize:
 {_psql_hint("demo-iceberg.sql")}
 
 CREATE CONNECTION IF NOT EXISTS demo_iceberg TO ICEBERG CATALOG (

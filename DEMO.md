@@ -2,7 +2,7 @@
 
 A guided tour of Materialize on a laptop: a self-managed instance on k3d plus
 realistic upstream systems to connect it to and an Iceberg catalog to sink
-into. Everything below was run end to end against Materialize v26.40.0.
+into. Everything below was run end to end against Materialize v26.41.0.
 
 This is the **seeded** flavor of mzk3's add-ons (`--install-demo`). The same
 resources deploy clean, with no demo data, via `--addon NAME`; see the README's

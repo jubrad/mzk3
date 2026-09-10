@@ -260,7 +260,7 @@ mzk3 list-versions
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-v, --version` | `MZ_VERSION` | `v26.40.0` | Materialize version to deploy (or `latest`) |
+| `-v, --version` | `MZ_VERSION` | `v26.41.0` | Materialize version to deploy (or `latest`) |
 | `-o, --operator-version` | `MZ_OPERATOR_VERSION` | same as `--version` | Materialize Operator Helm chart version |
 | `-n, --namespace` | `MZ_NAMESPACE` | `materialize` | Kubernetes namespace for the operator |
 | `-i, --instance-ns` | `MZ_INSTANCE_NS` | `materialize-environment` | Namespace for Materialize instances |
@@ -313,7 +313,7 @@ reproducible; nothing floats on `latest`. Bump these constants to move:
 
 | What | Constant (file) | Value |
 |------|-----------------|-------|
-| Materialize (operator chart + environmentd) | `DEFAULT_VERSION` (`config.py`); `-v`/`-o` override, `-v latest` resolves from the helm repo | `v26.40.0` |
+| Materialize (operator chart + environmentd) | `DEFAULT_VERSION` (`config.py`); `-v`/`-o` override, `-v latest` resolves from the helm repo | `v26.41.0` |
 | k3s image k3d boots | `K3S_IMAGE` (`commands.py`) | `rancher/k3s:v1.35.5-k3s1` |
 | RustFS operator chart tag + image | `RUSTFS_OPERATOR_VERSION`, `RUSTFS_OPERATOR_IMAGE_TAG` (`commands.py`) | `0.07` |
 | RustFS server | `RUSTFS_IMAGE` (`commands.py`) | `rustfs/rustfs:1.0.0-beta.12` |
@@ -328,6 +328,12 @@ reproducible; nothing floats on `latest`. Bump these constants to move:
 The Materialize metadata PostgreSQL comes from the upstream testing manifest
 for the chosen Materialize version (currently `postgres:13`), so it is pinned
 by `DEFAULT_VERSION`/`-v` rather than by mzk3 directly.
+
+The operator chart is published to the Helm repo separately from the
+environmentd image, sometimes a little later. When the chart for the requested
+version isn't there yet, mzk3 warns and uses the newest available chart (pin
+one explicitly with `-o`); once the matching chart is published it is picked
+up automatically on the next install/upgrade.
 
 ## Accessing Materialize
 
@@ -413,7 +419,7 @@ Notes:
   `CATALOG TYPE = 'rest'` and `CREDENTIAL = 'root:root'`; Polaris hands the
   RustFS endpoint and credentials to the sink on table load, so no AWS
   connection is needed. Iceberg sinks are in public preview; sinking to a
-  generic REST catalog needs a recent Materialize (validated with v26.40.0,
+  generic REST catalog needs a recent Materialize (validated with v26.41.0,
   the default). The demo flavor differs only in the SQL it writes.
 - **Seeding.** PostgreSQL/MySQL seed on first start (docker-entrypoint init
   scripts, so only when the volume is new). Redpanda is seeded by a Job that
