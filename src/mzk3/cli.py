@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import commands as c
+from . import demo
 from . import log
 from .commands import HELM_REPO
 from .config import Config, build_parser, resolve
@@ -60,6 +61,26 @@ def _wait_backends_ready(runner: Runner) -> None:
                 "deployment/postgres", "-n", "materialize"], check=False)
     runner.run(["kubectl", "wait", "--for=jsonpath={.status.currentState}=Ready",
                 "tenant/rustfs", "-n", "materialize", "--timeout=300s"], check=False)
+
+
+COMMUNITY_LICENSE_URL = "https://materialize.com/self-managed/community-license/"
+
+
+def require_license_key(cfg: Config) -> None:
+    """Self-managed Materialize v26+ needs a license key: the operator reads
+    it from the backend secret and rejects the instance otherwise (an empty
+    key fails JWT validation with a cryptic `InvalidToken`). Catch that up
+    front, before creating clusters or downloading anything."""
+    if cfg.license_key_file:
+        if not Path(cfg.license_key_file).is_file():
+            log.error(f"License key file does not exist: {cfg.license_key_file}")
+            raise Abort
+        return
+    log.error("A Materialize license key is required (self-managed v26+).")
+    log.error("Pass -l/--license-key FILE, set MZ_LICENSE_KEY=FILE, or put "
+              '"license_key" in the config file.')
+    log.error(f"Free Community license keys: {COMMUNITY_LICENSE_URL}")
+    raise Abort
 
 
 def require(runner: Runner, binary: str, hint: str) -> None:
@@ -234,6 +255,9 @@ def cmd_status(runner: Runner, cfg: Config) -> None:
         (f"=== Services in {cfg.instance_ns} ===",
          ["kubectl", "get", "svc", "-n", cfg.instance_ns],
          f"No services found in {cfg.instance_ns}"),
+        (f"=== Demo components (pods in {demo.NAMESPACE}) ===",
+         ["kubectl", "get", "pods", "-n", demo.NAMESPACE],
+         "No demo components installed (mzk3 install --demo ...)"),
     ]:
         print()
         log.info(title)
@@ -309,7 +333,7 @@ def _wipe_persist(runner: Runner) -> None:
         f"mc alias set r http://{c.RUSTFS_S3_HOST}:9000 "
         f"{c.RUSTFS_ACCESS_KEY} {c.RUSTFS_SECRET_KEY} && "
         "mc rm --recursive --force r/bucket || true; echo wiped")
-    runner.run(["kubectl", "run", pod, "-n", "materialize", "--image=minio/mc",
+    runner.run(["kubectl", "run", pod, "-n", "materialize", f"--image={c.MC_IMAGE}",
                 "--restart=Never", "--command", "--", "/bin/sh", "-c", script],
                check=False)
     runner.run(["kubectl", "wait", "--for=jsonpath={.status.phase}=Succeeded",
@@ -362,6 +386,7 @@ def cmd_destroy_environment(runner: Runner, cfg: Config) -> None:
 
 
 def cmd_recreate_environment(runner: Runner, cfg: Config) -> None:
+    require_license_key(cfg)
     use_cluster_context(runner, cfg.cluster_name)
     check_prerequisites(runner)
     if not is_mzk3_cluster(runner, cfg.cluster_name) and not cfg.force:
@@ -384,8 +409,7 @@ def cmd_recreate_environment(runner: Runner, cfg: Config) -> None:
 
 
 def cmd_install(runner: Runner, cfg: Config) -> None:
-    if cfg.create_cluster:
-        create_cluster(runner, cfg.cluster_name)
+    require_license_key(cfg)
     if cfg.create_cluster:
         create_cluster(runner, cfg.cluster_name)
     else:
@@ -450,9 +474,18 @@ def cmd_install(runner: Runner, cfg: Config) -> None:
     # the instance namespace so monitoring's PodMonitor has somewhere to land.
     ensure_namespace(runner, cfg.instance_ns)
     tasks = [lambda: _deploy_or_skip_instance(runner, cfg)]
+    extras = []
     if cfg.install_dashboards:
-        log.step("Deploying Materialize instance and monitoring (in parallel)...")
         tasks.append(lambda: install_monitoring(runner, cfg))
+        extras.append("monitoring")
+    if cfg.demo:
+        # Demo infra only needs the cluster (and RustFS, ready above) -- not
+        # the instance -- so it comes up alongside it.
+        tasks.append(lambda: demo.install(runner, cfg, cfg.demo))
+        extras.append("demo components")
+    if extras:
+        log.step("Deploying Materialize instance and "
+                 f"{' + '.join(extras)} (in parallel)...")
     _parallel(*tasks)
 
     _print_success_install(cfg)
@@ -473,6 +506,8 @@ def _present_components(runner: Runner, cfg: Config) -> list[str]:
         present.append("rustfs")
     if exists(["kubectl", "get", "deployment", "postgres", "-n", "materialize"]):
         present.append("postgres")
+    if demo.present(runner):
+        present.append("demo")
     return present
 
 
@@ -506,6 +541,22 @@ def _upgrade_rustfs(runner: Runner, cfg: Config) -> None:
 
 def _upgrade_monitoring(runner: Runner, cfg: Config) -> None:
     install_monitoring(runner, cfg)
+
+
+def _demo_targets(runner: Runner, cfg: Config) -> list[str]:
+    """Demo components an upgrade touches: whatever is deployed, plus any
+    newly requested with --demo."""
+    wanted = set(demo.present(runner)) | set(cfg.demo)
+    return [comp for comp in demo.MANIFESTS if comp in wanted]
+
+
+def _upgrade_demo(runner: Runner, cfg: Config) -> None:
+    targets = _demo_targets(runner, cfg)
+    if not targets:
+        log.warn("No demo components deployed or requested (--demo); skipping.")
+        return
+    log.step("Re-applying demo components (manifests pinned by this mzk3)...")
+    demo.install(runner, cfg, targets)
 
 
 def _prepull_image(runner: Runner, image: str) -> None:
@@ -558,6 +609,10 @@ def _upgrade_plan(cfg: Config, components: list[str]) -> list[str]:
                      f"(operator chart {cfg.operator_version})")
     if "monitoring" in components:
         lines.append(f"Monitoring: helm upgrade stack to {c.MONITORING_VERSION}")
+    if "demo" in components:
+        lines.append("Demo: re-apply manifests for the deployed demo components"
+                     + (f" + {', '.join(cfg.demo)}" if cfg.demo else "")
+                     + " (data is kept)")
     return lines
 
 
@@ -605,6 +660,8 @@ def cmd_upgrade(runner: Runner, cfg: Config) -> None:
         _upgrade_materialize(runner, cfg)
     if "monitoring" in components:
         _upgrade_monitoring(runner, cfg)
+    if "demo" in components:
+        _upgrade_demo(runner, cfg)
 
     print()
     log.info("Upgrade complete.")
@@ -660,11 +717,27 @@ def install_rustfs_operator(runner: Runner) -> None:
         tf.extractall(src, filter="data")
     root = next(p for p in src.iterdir() if p.is_dir())
     chart = root / "deploy" / "rustfs-operator"
-    runner.run([
-        "helm", "upgrade", "--install", "rustfs-operator", str(chart),
-        "--namespace", "rustfs-system", "--create-namespace",
-        "--wait", "--timeout", "5m",
-    ])
+    _prepare_rustfs_chart_transition(runner)
+    runner.run(c.rustfs_operator_install(str(chart)))
+
+
+def _prepare_rustfs_chart_transition(runner: Runner) -> None:
+    """Newer operator charts give the operator console Deployment
+    `strategy.type: Recreate`, and Kubernetes refuses to apply that over an
+    existing object still carrying `rollingUpdate` fields (helm: "may not be
+    specified when strategy type is Recreate"). The console is a stateless
+    UI, so drop it and let the chart recreate it. No-op on fresh installs and
+    once the Deployment already uses Recreate."""
+    res = runner.run(["kubectl", "get", "deployment", "rustfs-operator-console",
+                      "-n", "rustfs-system", "-o", "jsonpath={.spec.strategy.type}"],
+                     check=False, capture=True)
+    if not res.ok or res.stdout.strip() != "RollingUpdate":
+        return
+    log.info("Recreating the RustFS operator console Deployment for the chart's "
+             "new rollout strategy...")
+    runner.run(["kubectl", "delete", "deployment", "rustfs-operator-console",
+                "-n", "rustfs-system", "--ignore-not-found", "--wait=true"],
+               check=False)
 
 
 def _deploy_rustfs(runner: Runner, cfg: Config) -> None:
@@ -695,7 +768,7 @@ metadata:
   name: rustfs
   namespace: materialize
 spec:
-  image: rustfs/rustfs:latest
+  image: {c.RUSTFS_IMAGE}
   credsSecret:
     name: rustfs-credentials
   buckets:
@@ -759,8 +832,9 @@ def _patch_configs(runner: Runner, cfg: Config) -> None:
         mz.write_text(patch.patch_license_key(mz.read_text(), key_path.read_text()))
         log.info("License key configured successfully.")
     else:
-        log.warn("No license key provided. Materialize will run without a "
-                 "license key.")
+        # Only reachable from `upgrade`, which never re-applies the backend
+        # secret; the instance keeps the license key it already has.
+        log.info("No license key given; the existing one is left in place.")
 
 
 def _ensure_metrics_server(runner: Runner) -> None:
@@ -774,6 +848,7 @@ def _ensure_metrics_server(runner: Runner) -> None:
             "--kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP}")
     if not runner.run(
         ["helm", "install", "metrics-server", "metrics-server/metrics-server",
+         "--version", c.METRICS_SERVER_CHART_VERSION,
          "--namespace", "kube-system", "--set", f"args={args}", "--wait"],
         check=False,
     ).ok:
@@ -1278,6 +1353,15 @@ def _print_success_install(cfg: Config) -> None:
         log.info("  GRAFANA=$(kubectl -n monitoring get svc -o name | grep grafana | "
                  "head -1)")
         log.info("  kubectl port-forward -n monitoring $GRAFANA 3000:80")
+    if cfg.demo:
+        log.info(f"Demo components (namespace {demo.NAMESPACE}):")
+        for comp in cfg.demo:
+            for line in demo.endpoint_lines(comp):
+                log.info(f"  {line}")
+        log.info("Connect Materialize to them (SQL files in this directory):")
+        for comp in cfg.demo:
+            log.info(f"  psql -h localhost -p 6875 -U materialize materialize "
+                     f"-f {demo.sql_path(comp)}")
 
 
 # --- dispatch ------------------------------------------------------------

@@ -25,3 +25,12 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture
+def license_file(tmp_path):
+    """A (dummy) license key file: install/recreate-environment refuse to run
+    without one. Never validated by mzk3 itself, only passed through."""
+    f = tmp_path / "license.key"
+    f.write_text("dummy-license-key\n")
+    return str(f)

@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-DEFAULT_VERSION = "v26.4.0"
+DEFAULT_VERSION = "v26.40.0"
 
 MZK3_LABEL = "created-by=mzk3"
 
@@ -21,7 +21,19 @@ DEFAULT_RESOURCES: dict[str, dict[str, str]] = {
     # decoding it). OOM here is catastrophic, so default to generous headroom;
     # override down via the config file on smaller machines.
     "rustfs": {"cpu": "1", "memory": "8Gi"},
+    # Optional demo components (--demo). Small: they hold a handful of rows.
+    "demo-postgres": {"cpu": "500m", "memory": "512Mi"},
+    "demo-mysql": {"cpu": "1", "memory": "1Gi"},
+    "demo-kafka": {"cpu": "1", "memory": "1Gi"},
+    # Polaris is a JVM; its Postgres metastore gets its own small container.
+    "demo-iceberg": {"cpu": "1", "memory": "1536Mi"},
+    "demo-iceberg-db": {"cpu": "250m", "memory": "256Mi"},
 }
+
+# Optional demo infrastructure that can be deployed alongside Materialize so a
+# fresh install has realistic upstream systems (and an Iceberg catalog) to point
+# sources and sinks at. See demo.py.
+DEMO_COMPONENTS = ("postgres", "mysql", "kafka", "iceberg")
 
 # Commands that actually do work, paired with a one-line description.
 _COMMAND_HELP = {
@@ -58,6 +70,8 @@ Environment variables (used as defaults; flags override):
     MZ_VALUES_FILE       Path to values file
     MZ_SKIP_CONFIRM      Skip confirmation prompts ("true"/"false")
     MZ_INSTALL_DASHBOARDS  Install monitoring stack ("true"/"false")
+    MZ_DEMO              Demo components to deploy, comma-separated
+                         (postgres,mysql,kafka,iceberg or "all")
     MZ_CONFIG            Path to a JSON config file
 
 Config file (--config / MZ_CONFIG):
@@ -66,25 +80,44 @@ Config file (--config / MZ_CONFIG):
       {{
         "version": "v26.30.0",
         "install_dashboards": true,
+        "demo": ["postgres", "kafka"],
         "resources": {{
           "environmentd": {{"cpu": "2", "memory": "4Gi"}},
           "rustfs":       {{"cpu": "1", "memory": "1Gi"}}
         }}
       }}
 
+License key:
+    Self-managed Materialize v26+ requires a license key; install and
+    recreate-environment refuse to run without one (-l FILE, MZ_LICENSE_KEY,
+    or "license_key" in the config file). Free Community keys:
+    https://materialize.com/self-managed/community-license/
+
 Examples:
     mzk3 create-cluster                     # create a k3d cluster
     mzk3 create-cluster -c my-cluster       # ...with a custom name
-    mzk3 install --create-cluster           # create cluster and install together
-    mzk3 install -c my-cluster              # install on an existing mzk3 cluster
+    mzk3 install --create-cluster -l ./license.key   # create cluster + install
+    mzk3 install -c my-cluster -l ./license.key      # on an existing mzk3 cluster
     mzk3 install -v {DEFAULT_VERSION} -l ./license.key
-    mzk3 install --install-dashboards       # include Prometheus + Grafana
-    mzk3 install --force                    # install on any cluster (skip safety check)
+    mzk3 install -l ./license.key --install-dashboards  # + Prometheus/Grafana
+    mzk3 install -l ./license.key --demo postgres --demo kafka  # + demo sources
+    mzk3 install -l ./license.key --demo all  # postgres, mysql, kafka + Iceberg
+    mzk3 install -l ./license.key --force   # install on any cluster (skip safety check)
     mzk3 upgrade -v v26.5.0 --yes           # upgrade, no prompt
     mzk3 upgrade -v v26.5.0 --force         # force a rollout
+    mzk3 upgrade --component demo           # re-apply the demo manifests
     mzk3 reset --yes                        # destroy + recreate, no prompt
     mzk3 status
     mzk3 list-versions
+
+Demo components (--demo / MZ_DEMO / config "demo"):
+    postgres   PostgreSQL 16 with logical replication + a seeded schema
+    mysql      MySQL 8.4 with GTID binlog replication + a seeded schema
+    kafka      Redpanda (Kafka API + schema registry) with a seeded topic
+    iceberg    Apache Polaris Iceberg REST catalog, warehouse on RustFS
+    all        everything above
+    Each writes a ready-to-run demo-<name>.sql with the matching Materialize
+    CREATE CONNECTION / SOURCE / SINK statements.
 
 Cluster safety:
     install only installs on clusters it created (identified by a
@@ -113,9 +146,44 @@ class Config:
     environmentd_image: str | None = None
     resources: dict[str, dict[str, str]] = field(default_factory=dict)
     components: list[str] = field(default_factory=list)
+    demo: list[str] = field(default_factory=list)
 
 
-UPGRADE_COMPONENTS = ("materialize", "monitoring", "rustfs", "postgres")
+UPGRADE_COMPONENTS = ("materialize", "monitoring", "rustfs", "postgres", "demo")
+
+
+def normalize_demo(values) -> list[str]:
+    """Flatten/validate demo component names from any layer (flag, config file,
+    env). Accepts nested lists and comma-separated strings, expands `all`,
+    dedupes, and returns them in canonical DEMO_COMPONENTS order."""
+    names: list[str] = []
+
+    def walk(v):
+        if v is None:
+            return
+        if isinstance(v, str):
+            names.extend(x.strip() for x in v.split(",") if x.strip())
+        else:
+            for item in v:
+                walk(item)
+
+    walk(values)
+    if "all" in names:
+        return list(DEMO_COMPONENTS)
+    unknown = sorted(set(names) - set(DEMO_COMPONENTS))
+    if unknown:
+        raise ValueError(
+            f"unknown demo component(s): {', '.join(unknown)} "
+            f"(choose from {', '.join(DEMO_COMPONENTS)}, all)")
+    return [c for c in DEMO_COMPONENTS if c in names]
+
+
+def _demo_arg(value: str) -> list[str]:
+    """argparse `type` for --demo: validates and splits `a,b` into a list."""
+    try:
+        return normalize_demo(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
 
 
 def _merge_resources(override: Mapping | None) -> dict[str, dict[str, str]]:
@@ -175,6 +243,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--install-dashboards", dest="install_dashboards",
                    action="store_true", default=None,
                    help="install the Prometheus + Grafana monitoring stack")
+    p.add_argument("--demo", dest="demo", action="extend", type=_demo_arg,
+                   default=None, metavar="NAME",
+                   help="deploy demo infrastructure alongside Materialize: "
+                        "postgres, mysql, kafka (Redpanda), iceberg (Polaris "
+                        "catalog on RustFS), or all (repeatable / "
+                        "comma-separated)")
     p.add_argument("--create-cluster", dest="create_cluster",
                    action="store_true", default=None,
                    help="create the k3d cluster before installing (install only)")
@@ -265,8 +339,21 @@ def resolve(argv: list[str], env: Mapping[str, str] | None = None) -> tuple[str,
         resources=_merge_resources(fileconf.get("resources")),
         components=(ns.components if ns.components is not None
                     else (fileconf.get("components") or [])),
+        demo=_resolve_demo(ns.demo, fileconf.get("demo"), env.get("MZ_DEMO")),
     )
     return ns.command, cfg
+
+
+def _resolve_demo(flag, fileval, envval) -> list[str]:
+    """flag > config file > env, like every other setting; each layer is a
+    complete list (they don't accumulate)."""
+    if flag is not None:
+        return normalize_demo(flag)
+    if fileval is not None:
+        return normalize_demo(fileval)
+    if envval:
+        return normalize_demo(envval)
+    return []
 
 
 def _env_bool(env: Mapping[str, str], key: str) -> bool:

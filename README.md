@@ -8,6 +8,8 @@ A deployment tool for running [Materialize](https://materialize.com/) self-manag
 
 - **Create Cluster** - Create a new k3d cluster for Materialize
 - **Install** - Deploy Materialize with all required dependencies
+- **Demo components** - Optionally deploy PostgreSQL, MySQL, Redpanda (Kafka)
+  and an Iceberg REST catalog next to it, seeded and ready to connect to
 - **Upgrade** - Upgrade to a new Materialize version with controlled rollouts
 - **Reset** - Destroy and recreate the k3d cluster
 - **Status** - Check the health of your deployment
@@ -20,6 +22,11 @@ A deployment tool for running [Materialize](https://materialize.com/) self-manag
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Helm](https://helm.sh/docs/intro/install/) v3+
 - [Docker](https://docs.docker.com/get-docker/)
+- A Materialize **license key** (required by self-managed v26+; the operator
+  rejects an instance without one). Free Community keys:
+  https://materialize.com/self-managed/community-license/ — pass the file
+  with `-l/--license-key`, `MZ_LICENSE_KEY`, or `"license_key"` in the config
+  file.
 
 ### Quick k3d Setup
 
@@ -51,11 +58,11 @@ Note: You don't need to create the cluster manually. Use `mzk3 create-cluster` o
 
 ```bash
 # Create cluster and install in one step
-mzk3 install --create-cluster
+mzk3 install --create-cluster --license-key /path/to/license.key
 
 # Or create cluster first, then install
 mzk3 create-cluster
-mzk3 install
+mzk3 install -l /path/to/license.key
 ```
 
 This will:
@@ -75,6 +82,11 @@ installed from its in-repo helm chart into `rustfs-system`). mzk3 then applies a
 
 - **PVC-backed** (durable — survives pod restarts, unlike a plain emptyDir
   Deployment), single-node (`servers: 1`, `volumesPerServer: 1`).
+- **Pinned images** (`RUSTFS_IMAGE`, `RUSTFS_OPERATOR_IMAGE_TAG` in
+  `src/mzk3/commands.py`): the operator refuses RustFS images it can't verify
+  for its seccomp profile (`latest`, `-rc.*`, digests), so the Tenant names a
+  known-compatible release; the operator chart's own image tag is set
+  explicitly too, since the chart otherwise floats on `latest`.
 - **Buckets auto-created** by the operator (`bucket`, `persist`, `thanos`) — no
   separate bucket-creation Job.
 - Credentials come from a `rustfs-credentials` secret (`minioadmin`/`minioadmin`;
@@ -88,14 +100,16 @@ The integration suite (`pytest --run-integration`) asserts environmentd reaches
 ### Install with Options
 
 ```bash
-# Install a specific version
+# Install a specific version (the license key can also come from MZ_LICENSE_KEY)
+export MZ_LICENSE_KEY=/path/to/license.key
 mzk3 install -v v26.12.1
-
-# Install with a license key
-mzk3 install --license-key /path/to/license.key
 
 # Install with Prometheus/Grafana monitoring
 mzk3 install --install-dashboards
+
+# Add demo upstream systems + an Iceberg catalog to connect Materialize to
+mzk3 install --demo postgres --demo kafka
+mzk3 install --demo all
 
 # Combine options
 mzk3 install -v v26.12.1 --license-key /path/to/license.key --install-dashboards
@@ -134,8 +148,8 @@ mzk3 install [options]
 ### upgrade
 
 Upgrade an existing deployment. By default it updates **all installed
-components** (Materialize, monitoring, RustFS, postgres); scope it with
-`--component` (repeatable).
+components** (Materialize, monitoring, RustFS, postgres, demo components);
+scope it with `--component` (repeatable).
 
 ```bash
 mzk3 upgrade -v v26.12.1          # all components, Materialize -> v26.12.1
@@ -158,6 +172,8 @@ mzk3 upgrade -v v26.12.1 -y       # skip the confirmation prompt
 - **PostgreSQL**: pre-pulls the target image, then does a rolling swap
   (brief metadata downtime; true zero-downtime would need replication).
 - **RustFS / monitoring**: helm-upgraded to the versions this mzk3 ships.
+- **Demo components**: manifests re-applied (image versions pinned by this
+  mzk3); PVC-backed data is kept. `--demo NAME` alongside adds a new one.
 
 ### Development: local charts and custom images
 
@@ -242,14 +258,15 @@ mzk3 list-versions
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-v, --version` | `MZ_VERSION` | `v26.4.0` | Materialize version to deploy |
+| `-v, --version` | `MZ_VERSION` | `v26.40.0` | Materialize version to deploy (or `latest`) |
 | `-o, --operator-version` | `MZ_OPERATOR_VERSION` | same as `--version` | Materialize Operator Helm chart version |
 | `-n, --namespace` | `MZ_NAMESPACE` | `materialize` | Kubernetes namespace for the operator |
 | `-i, --instance-ns` | `MZ_INSTANCE_NS` | `materialize-environment` | Namespace for Materialize instances |
 | `-r, --release-name` | `MZ_RELEASE_NAME` | `my-materialize-operator` | Helm release name |
-| `-l, --license-key` | `MZ_LICENSE_KEY` | - | Path to license key file |
+| `-l, --license-key` | `MZ_LICENSE_KEY` | - | Path to license key file (**required** for install / recreate-environment) |
 | `-c, --cluster` | `K3D_CLUSTER_NAME` | `mzk3-cluster` | k3d cluster name |
 | `--install-dashboards` | `MZ_INSTALL_DASHBOARDS` | `false` | Install upstream materialize-monitoring stack |
+| `--demo` | `MZ_DEMO` | - | Demo components to deploy: `postgres`, `mysql`, `kafka`, `iceberg`, `all` (repeatable / comma-separated) |
 | `--config` | `MZ_CONFIG` | - | Path to a JSON config file (see below) |
 | `--create-cluster` | - | `false` | Create k3d cluster before install |
 | `--force` | - | `false` | Force operation (upgrade: forceRollout; install: bypass cluster check) |
@@ -266,9 +283,11 @@ flags.
 {
   "version": "v26.30.0",
   "install_dashboards": true,
+  "demo": ["postgres", "kafka"],
   "resources": {
     "environmentd": {"cpu": "2", "memory": "4Gi"},
-    "rustfs":       {"cpu": "1", "memory": "1Gi"}
+    "rustfs":       {"cpu": "1", "memory": "1Gi"},
+    "demo-kafka":   {"cpu": "1", "memory": "2Gi"}
   }
 }
 ```
@@ -282,6 +301,29 @@ variable > built-in default**. Any key in the table above may appear in the
 config file (using the long flag name with underscores, e.g. `operator_version`,
 `instance_ns`, `license_key`). The `resources` object is deep-merged over the
 defaults, so you can override just one field (e.g. only `rustfs.cpu`).
+
+## Pinned versions
+
+Everything mzk3 deploys is pinned to an exact version so installs are
+reproducible; nothing floats on `latest`. Bump these constants to move:
+
+| What | Constant (file) | Value |
+|------|-----------------|-------|
+| Materialize (operator chart + environmentd) | `DEFAULT_VERSION` (`config.py`); `-v`/`-o` override, `-v latest` resolves from the helm repo | `v26.40.0` |
+| k3s image k3d boots | `K3S_IMAGE` (`commands.py`) | `rancher/k3s:v1.35.5-k3s1` |
+| RustFS operator chart tag + image | `RUSTFS_OPERATOR_VERSION`, `RUSTFS_OPERATOR_IMAGE_TAG` (`commands.py`) | `0.07` |
+| RustFS server | `RUSTFS_IMAGE` (`commands.py`) | `rustfs/rustfs:1.0.0-beta.12` |
+| MinIO client (persist wipe, bucket setup) | `MC_IMAGE` (`commands.py`) | `minio/mc:RELEASE.2025-08-13T08-35-41Z` |
+| metrics-server chart | `METRICS_SERVER_CHART_VERSION` (`commands.py`) | `3.14.0` |
+| materialize-monitoring | `MONITORING_VERSION` (`commands.py`) | `v0.6.0` |
+| Demo PostgreSQL / MySQL | `POSTGRES_IMAGE`, `MYSQL_IMAGE` (`demo.py`) | `postgres:16.15`, `mysql:8.4.11` |
+| Demo Redpanda | `REDPANDA_IMAGE` (`demo.py`) | `redpandadata/redpanda:v25.3.17` |
+| Demo Iceberg catalog | `POLARIS_VERSION` (`demo.py`) | `apache/polaris` + `polaris-admin-tool` `1.7.0` |
+| Demo helper (catalog setup sidecar) | `CURL_IMAGE` (`demo.py`) | `curlimages/curl:8.14.1` |
+
+The Materialize metadata PostgreSQL comes from the upstream testing manifest
+for the chosen Materialize version (currently `postgres:13`), so it is pinned
+by `DEFAULT_VERSION`/`-v` rather than by mzk3 directly.
 
 ## Accessing Materialize
 
@@ -306,8 +348,9 @@ MZ_BALANCER=$(kubectl -n materialize-environment get svc -o name | grep balancer
 # Port forward
 kubectl port-forward $MZ_BALANCER 6875:6875 -n materialize-environment
 
-# Connect with psql
-psql -h localhost -p 6875 -U mz_system materialize
+# Connect with psql (any ordinary user name works with authenticatorKind None;
+# system roles such as mz_system are refused on the external port)
+psql -h localhost -p 6875 -U materialize materialize
 ```
 
 ### Internal Cluster Access
@@ -315,6 +358,67 @@ psql -h localhost -p 6875 -U mz_system materialize
 From within the cluster, connect to:
 - **Hostname**: `<instance-name>-balancerd.materialize-environment.svc.cluster.local`
 - **Port**: `6875`
+
+## Demo components
+
+A bare install has nothing to connect Materialize *to*. `--demo` deploys
+realistic upstream systems (and an Iceberg catalog to sink into) so a fresh
+environment can exercise sources and sinks the way a real one would. Pick any
+subset, or `all`. **[DEMO.md](DEMO.md) is the step-by-step walkthrough** for
+giving the demo; this section is the reference.
+
+```bash
+mzk3 install --create-cluster -l ./license.key --demo all
+mzk3 install -l ./license.key --demo kafka   # add one later; install is idempotent
+mzk3 upgrade --component demo                # re-apply the pinned manifests
+```
+
+Everything lands in the `demo` namespace with fixed throwaway credentials and
+PVC-backed storage, so data survives pod restarts. For each component mzk3
+writes a ready-to-run `demo-<name>.sql` (into the current directory) with the
+matching Materialize `CREATE CONNECTION` / `SOURCE` / `TABLE` / `SINK`
+statements, plus commands to poke the upstream side and watch results change:
+
+```bash
+kubectl port-forward -n materialize-environment "$(kubectl -n materialize-environment get svc -o name | grep balancerd)" 6875:6875
+psql -h localhost -p 6875 -U materialize materialize -f demo-postgres.sql
+```
+
+| Component | What you get | In-cluster endpoint | Credentials |
+|-----------|--------------|---------------------|-------------|
+| `postgres` | PostgreSQL 16, `wal_level=logical`, publication `mz_source`, seeded `customers`/`orders` tables (`REPLICA IDENTITY FULL`) | `postgres.demo.svc.cluster.local:5432`, db `demo` | `materialize`/`materialize` (replication user); admin `postgres`/`postgres` |
+| `mysql` | MySQL 8.4 with GTID binlog replication (`binlog_row_metadata=FULL`), same seeded schema in db `demo` | `mysql.demo.svc.cluster.local:3306` | `materialize`/`materialize`; `root`/`mysql` |
+| `kafka` | Redpanda: Kafka API, Confluent-compatible schema registry, HTTP proxy; seeded topic `demo_orders` (keyed JSON) | `redpanda.demo.svc.cluster.local:9092` (PLAINTEXT), registry `:8081` | none |
+| `iceberg` | Apache Polaris Iceberg REST catalog; catalog (warehouse) `demo`, namespace `demo`, data files in RustFS bucket `iceberg` | `http://iceberg-catalog.demo.svc.cluster.local:8181/api/catalog` | OAuth2 client credential `root:root` |
+
+Notes:
+
+- **Iceberg on RustFS.** RustFS is the S3-compatible object store that persist
+  already uses; Iceberg tables are Parquet + metadata files in a bucket plus a
+  *catalog* that tracks them. mzk3 runs [Apache Polaris](https://polaris.apache.org/)
+  as that catalog (the same one Materialize's own Iceberg sink tests use),
+  backed by its own small Postgres so table metadata survives restarts, with
+  the warehouse pointed at `s3://iceberg/` on RustFS. Materialize connects with
+  `CATALOG TYPE = 'rest'` and `CREDENTIAL = 'root:root'`; Polaris hands the
+  RustFS endpoint and credentials to the sink on table load, so no AWS
+  connection is needed. Iceberg sinks are in public preview; sinking to a
+  generic REST catalog needs a recent Materialize (validated with v26.40.0,
+  the default). `demo-iceberg.sql` shows append and upsert sinks and how to
+  list the resulting tables/files.
+- **Seeding.** PostgreSQL/MySQL seed on first start (docker-entrypoint init
+  scripts, so only when the volume is new). Redpanda is seeded by a Job that
+  creates `demo_orders` and produces five keyed JSON records; it is re-run on
+  every install/upgrade but only seeds when the topic is new.
+- **Resources.** Defaults are small (`demo-postgres` 500m/512Mi, `demo-mysql`
+  1/1Gi, `demo-kafka` 1/1Gi, `demo-iceberg` 1/1536Mi + `demo-iceberg-db`
+  250m/256Mi) and overridable via the config file's `resources` object.
+  Redpanda pins 75% of its memory limit for itself.
+- **Reachability.** The operator's network policies are off by default in the
+  k3s values, so environmentd/clusterd reach the `demo` namespace directly.
+  Everything is plaintext with fixed passwords: this is for demos, not
+  production.
+- `mzk3 status` lists the demo pods; `mzk3 upgrade` treats deployed demo
+  components as an installed component (`demo`).
 
 ## Monitoring
 
@@ -394,6 +498,14 @@ Notes:
 │  │  │                        console                               │││
 │  │  │                     (web UI)                                 │││
 │  │  └─────────────────────────────────────────────────────────────┘││
+│  └─────────────────────────────────────────────────────────────────┘│
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │              demo namespace (optional, --demo)                   ││
+│  │  ┌────────────┐ ┌────────┐ ┌──────────┐ ┌────────────────────┐   ││
+│  │  │ PostgreSQL │ │ MySQL  │ │ Redpanda │ │ Polaris (Iceberg   │   ││
+│  │  │ (source)   │ │(source)│ │ (Kafka)  │ │ catalog -> RustFS) │   ││
+│  │  └────────────┘ └────────┘ └──────────┘ └────────────────────┘   ││
 │  └─────────────────────────────────────────────────────────────────┘│
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────────┐│

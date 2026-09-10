@@ -28,8 +28,21 @@ def monitoring_tarball_url(version: str = MONITORING_VERSION) -> str:
 
 
 # RustFS operator (github.com/rustfs/operator). Deployed from the release tag's
-# in-repo helm chart. Operator requires S3 credentials >= 8 chars.
-RUSTFS_OPERATOR_VERSION = "0.0.5"
+# in-repo helm chart. Operator requires S3 credentials >= 8 chars. The chart
+# alone doesn't pin the operator image (its appVersion lags the release tag),
+# so the image tag is set explicitly to the same release.
+RUSTFS_OPERATOR_VERSION = "0.07"
+RUSTFS_OPERATOR_IMAGE_TAG = "0.07"
+# The operator refuses a Tenant whose RustFS image it can't verify for its
+# RuntimeDefault seccomp profile: only `1.0.0-beta.9`+ betas or `>=1.0.0`
+# release tags pass (no `latest`, no `-rc.N`, no digests).
+RUSTFS_IMAGE = "rustfs/rustfs:1.0.0-beta.12"
+# MinIO client, used for S3 housekeeping (wiping persist, creating buckets).
+MC_IMAGE = "minio/mc:RELEASE.2025-08-13T08-35-41Z"
+# metrics-server helm chart (kubernetes-sigs), for `kubectl top` / pod metrics.
+METRICS_SERVER_CHART_VERSION = "3.14.0"
+# k3s image k3d boots the cluster with (Kubernetes version).
+K3S_IMAGE = "rancher/k3s:v1.35.5-k3s1"
 RUSTFS_ACCESS_KEY = "minioadmin"
 RUSTFS_SECRET_KEY = "minioadmin"
 # The Tenant named `rustfs` exposes its S3 API on service `rustfs-io:9000`.
@@ -38,6 +51,19 @@ RUSTFS_S3_HOST = "rustfs-io.materialize.svc.cluster.local"
 
 def rustfs_operator_tarball_url(version: str = RUSTFS_OPERATOR_VERSION) -> str:
     return f"https://codeload.github.com/rustfs/operator/tar.gz/refs/tags/{version}"
+
+
+# --- helm: rustfs operator -----------------------------------------------
+
+def rustfs_operator_install(chart_dir: str) -> list[str]:
+    """Install/upgrade the RustFS operator from an extracted release-tag chart,
+    pinning the operator image tag (the chart alone would float on `latest`)."""
+    return [
+        "helm", "upgrade", "--install", "rustfs-operator", chart_dir,
+        "--namespace", "rustfs-system", "--create-namespace",
+        "--set", f"operator.image.tag={RUSTFS_OPERATOR_IMAGE_TAG}",
+        "--wait", "--timeout", "5m",
+    ]
 
 
 # --- download URLs -------------------------------------------------------
@@ -59,6 +85,7 @@ def materialize_manifest_url(cfg: Config) -> str:
 def k3d_create(cluster_name: str) -> list[str]:
     return [
         "k3d", "cluster", "create", cluster_name,
+        "--image", K3S_IMAGE,
         "--runtime-label", f"{MZK3_LABEL}@server:*",
     ]
 

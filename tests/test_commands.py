@@ -21,6 +21,28 @@ def test_k3d_create_cluster_carries_label():
     assert "--runtime-label" in argv
     i = argv.index("--runtime-label")
     assert argv[i + 1] == "created-by=mzk3@server:*"
+    # the k3s (Kubernetes) version is pinned, not whatever k3d defaults to
+    assert argv[argv.index("--image") + 1] == c.K3S_IMAGE
+    assert ":" in c.K3S_IMAGE and "latest" not in c.K3S_IMAGE
+
+
+def test_rustfs_operator_install_pins_the_operator_image():
+    argv = c.rustfs_operator_install("rustfs-operator-src/operator-0.07/deploy/rustfs-operator")
+    assert argv[:4] == ["helm", "upgrade", "--install", "rustfs-operator"]
+    assert "rustfs-operator-src/operator-0.07/deploy/rustfs-operator" in argv
+    assert "--namespace" in argv and argv[argv.index("--namespace") + 1] == "rustfs-system"
+    # chart 0.07's appVersion lags its tag, so the image tag is set explicitly
+    assert f"operator.image.tag={c.RUSTFS_OPERATOR_IMAGE_TAG}" in argv
+    assert c.RUSTFS_OPERATOR_IMAGE_TAG == c.RUSTFS_OPERATOR_VERSION
+
+
+def test_every_pinned_reference_names_an_exact_version():
+    # "pin all of our versions": nothing we deploy may float on a mutable tag.
+    for ref in (c.RUSTFS_IMAGE, c.MC_IMAGE, c.K3S_IMAGE):
+        assert ":" in ref and not ref.endswith(":latest"), ref
+    for ver in (c.RUSTFS_OPERATOR_VERSION, c.RUSTFS_OPERATOR_IMAGE_TAG,
+                c.METRICS_SERVER_CHART_VERSION, c.MONITORING_VERSION):
+        assert ver and ver != "latest", ver
 
 
 def test_operator_install_uses_versions_and_values():

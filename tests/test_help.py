@@ -38,6 +38,10 @@ def test_help_documents_flags_with_descriptions():
     assert "--create-cluster" in text
     assert "--install-dashboards" in text
     assert "Skip confirmation" in text
+    # demo infrastructure flag + the components it accepts
+    assert "--demo" in text
+    for comp in ("postgres", "mysql", "kafka", "iceberg"):
+        assert comp in text
 
 
 def test_help_documents_environment_variables():

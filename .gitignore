@@ -7,6 +7,8 @@
 /monitoring-values.yaml
 /materialize-monitoring.tar.gz
 /materialize-monitoring-src/
+/demo-*.yaml
+/demo-*.sql
 
 # Python
 __pycache__/

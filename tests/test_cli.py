@@ -18,6 +18,7 @@ from mzk3.cli import (
     main,
     resolve_latest_version,
 )
+from mzk3 import commands as c
 from mzk3.config import resolve
 from mzk3.runner import Result, Runner
 
@@ -219,25 +220,50 @@ def test_upgrade_component_postgres_only():
     assert not ran(r, "kubectl", "patch", "materialize")
 
 
-def test_recreate_environment_aborts_on_foreign_cluster():
+def test_recreate_environment_aborts_on_foreign_cluster(license_file):
     def responder(argv):
         if argv[:2] == ["docker", "inspect"]:
             return Result(0, json.dumps([{"Config": {"Labels": {"created-by": "x"}}}]), "")
         return _env_responder(argv)
 
     r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
-    assert main(["recreate-environment", "--yes"], runner=r) == 1
+    assert main(["recreate-environment", "--yes", "-l", license_file], runner=r) == 1
     assert not ran(r, "kubectl", "delete", "materialize")  # aborted before touching
 
 
-def test_install_aborts_on_foreign_cluster_without_force():
+def test_install_requires_a_license_key_before_touching_anything():
+    # v26+ operators reject an instance without a valid license key, so refuse
+    # up front: no cluster created, no downloads, no kubectl.
+    r = Runner(dry_run=True, binaries=ALL_BINS)
+    assert main(["install", "--create-cluster", "-c", "demo"], runner=r) == 1
+    assert r.calls == []
+
+
+def test_install_requires_the_license_key_file_to_exist(tmp_path):
+    r = Runner(dry_run=True, binaries=ALL_BINS)
+    assert main(["install", "-l", str(tmp_path / "missing.key")], runner=r) == 1
+    assert r.calls == []
+
+
+def test_recreate_environment_requires_a_license_key_before_destroying():
+    r = Runner(dry_run=True, responder=_env_responder, binaries=ALL_BINS)
+    assert main(["recreate-environment", "--yes"], runner=r) == 1
+    assert not ran(r, "kubectl", "delete", "materialize")
+
+
+def test_upgrade_does_not_require_a_license_key():
+    r = Runner(dry_run=True, binaries=ALL_BINS)
+    assert main(["upgrade", "--yes", "--component", "postgres"], runner=r) == 0
+
+
+def test_install_aborts_on_foreign_cluster_without_force(license_file):
     def responder(argv):
         if argv[:2] == ["docker", "inspect"]:
             return Result(0, json.dumps([{"Config": {"Labels": {"created-by": "x"}}}]), "")
         return None
 
     r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
-    rc = main(["install", "-c", "foreign"], runner=r)
+    rc = main(["install", "-c", "foreign", "-l", license_file], runner=r)
     assert rc == 1
     # never got as far as touching helm repos / manifests
     assert not ran(r, "kubectl", "apply", "-f", "sample-postgres.yaml")
@@ -299,6 +325,52 @@ def test_operator_chart_version_untouched_if_repo_unavailable():
     assert cfg.operator_version == "v26.30.0"  # no data, don't guess
 
 
+def test_rustfs_chart_transition_recreates_console_only_when_strategy_conflicts():
+    from mzk3.cli import _prepare_rustfs_chart_transition
+
+    def console_strategy(strategy):
+        def responder(argv):
+            if argv[:3] == ["kubectl", "get", "deployment"] and "rustfs-operator-console" in argv:
+                return Result(0, strategy, "") if strategy else Result(1, "", "not found")
+            return None
+        return responder
+
+    delete = ["kubectl", "delete", "deployment", "rustfs-operator-console"]
+    # old chart's console (RollingUpdate) -> dropped so the Recreate chart applies
+    r = Runner(dry_run=True, responder=console_strategy("RollingUpdate"), binaries=ALL_BINS)
+    _prepare_rustfs_chart_transition(r)
+    assert ran(r, *delete)
+    # already on the new strategy -> untouched
+    r = Runner(dry_run=True, responder=console_strategy("Recreate"), binaries=ALL_BINS)
+    _prepare_rustfs_chart_transition(r)
+    assert not ran(r, *delete)
+    # fresh install (no console yet) -> untouched
+    r = Runner(dry_run=True, responder=console_strategy(""), binaries=ALL_BINS)
+    _prepare_rustfs_chart_transition(r)
+    assert not ran(r, *delete)
+
+
+def test_metrics_server_install_is_version_pinned():
+    from mzk3.cli import _ensure_metrics_server
+
+    def responder(argv):
+        if argv[:3] == ["kubectl", "get", "deployment"]:
+            return Result(1, "", "not found")  # not installed yet
+        return None
+
+    r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
+    _ensure_metrics_server(r)
+    helm = next(cl for cl in r.calls if cl[:2] == ["helm", "install"])
+    assert helm[helm.index("--version") + 1] == c.METRICS_SERVER_CHART_VERSION
+
+
+def test_wipe_persist_uses_pinned_mc_image():
+    r = Runner(dry_run=True, responder=_env_responder, binaries=ALL_BINS)
+    assert main(["destroy-environment", "--yes"], runner=r) == 0
+    run = next(cl for cl in r.calls if cl[:3] == ["kubectl", "run", "mzk3-wipe-persist"])
+    assert f"--image={c.MC_IMAGE}" in run
+
+
 def test_rustfs_tenant_is_pvc_backed_with_buckets_and_creds():
     _, cfg = resolve(["install"])
     t = _rustfs_tenant(cfg)
@@ -312,6 +384,9 @@ def test_rustfs_tenant_is_pvc_backed_with_buckets_and_creds():
     assert "servers: 1" in t
     # creds meet the >=8 char minimum
     assert 'accesskey: "minioadmin"' in t
+    # the operator rejects `latest` (unverifiable seccomp compatibility)
+    assert "rustfs/rustfs:latest" not in t
+    assert f"image: {c.RUSTFS_IMAGE}" in t
     # default rustfs resources
     assert 'cpu: "1"' in t
 
@@ -358,7 +433,7 @@ def test_materialize_podmonitor_scrapes_all_paths_and_relabels_org():
     assert "targetLabel: materialize_cloud_organization_name" in pm
 
 
-def test_install_switches_kubectl_context_before_prerequisites():
+def test_install_switches_kubectl_context_before_prerequisites(license_file):
     # install on an existing cluster must point kubectl at that cluster before
     # any kubectl call, else it talks to whatever context is active.
     def responder(argv):
@@ -368,7 +443,7 @@ def test_install_switches_kubectl_context_before_prerequisites():
 
     r = Runner(dry_run=True, responder=responder, binaries=ALL_BINS)
     # foreign cluster → aborts right after prereqs, before any downloads
-    main(["install", "-c", "mzk3-cluster"], runner=r)
+    main(["install", "-c", "mzk3-cluster", "-l", license_file], runner=r)
 
     def idx(pred):
         return next((i for i, cl in enumerate(r.calls) if pred(cl)), None)

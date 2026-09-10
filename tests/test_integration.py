@@ -31,6 +31,10 @@ def installed(tmp_path_factory):
     """Create the cluster, install Materialize, tear the cluster down after."""
     if not _have_tools():
         pytest.skip("k3d/kubectl/helm/docker not all available")
+    license_key = os.environ.get("MZ_LICENSE_KEY")
+    if not license_key or not os.path.isfile(license_key):
+        pytest.skip("MZ_LICENSE_KEY must point at a license key file "
+                    "(self-managed v26+ requires one)")
 
     # Downloads land in cwd (sample-*.yaml, manifests); isolate them.
     workdir = tmp_path_factory.mktemp("mzk3-it")
@@ -41,7 +45,7 @@ def installed(tmp_path_factory):
                    capture_output=True, check=False)
     try:
         rc = main(["install", "--create-cluster", "-c", CLUSTER,
-                   "--install-dashboards"])
+                   "-l", license_key, "--install-dashboards"])
         yield rc
     finally:
         os.chdir(prev)
