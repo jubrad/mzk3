@@ -45,6 +45,14 @@ def test_patch_environmentd_image_handles_multi_segment_version():
     )
 
 
+def test_patch_environmentd_image_replaces_prerelease_suffix():
+    text = "environmentdImageRef: materialize/environmentd:v26.48.0-dev.0\nbackendSecretName: x"
+    assert (
+        patch_environmentd_image(text, "jubrad/environmentd:v26.48.0-dev.0--pr.gabc")
+        == "environmentdImageRef: jubrad/environmentd:v26.48.0-dev.0--pr.gabc\nbackendSecretName: x"
+    )
+
+
 def test_patch_license_key_fills_empty():
     text = 'license_key: ""'
     assert patch_license_key(text, "ABC-123") == 'license_key: "ABC-123"'

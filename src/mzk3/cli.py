@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import tarfile
 import time
@@ -706,19 +707,25 @@ def _download_configs(runner: Runner, cfg: Config) -> None:
     log.info("All configuration files downloaded successfully.")
 
 
+def extract_tarball_root(tarball: str, dest: Path) -> Path:
+    """Extract a GitHub release tarball into `dest`, replacing anything there,
+    and return its single top-level directory."""
+    # A directory left by a previous release would make the root ambiguous.
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir()
+    with tarfile.open(tarball) as tf:
+        tf.extractall(dest, filter="data")
+    return next(p for p in dest.iterdir() if p.is_dir())
+
+
 def install_rustfs_operator(runner: Runner) -> None:
     """Install the RustFS operator from its pinned release-tag helm chart."""
     log.step(f"Installing RustFS operator {c.RUSTFS_OPERATOR_VERSION}...")
     if runner.dry_run:
         return
     tarball = "rustfs-operator.tar.gz"
-    src = Path("rustfs-operator-src")
     download(c.rustfs_operator_tarball_url(), tarball)
-    src.mkdir(exist_ok=True)
-    with tarfile.open(tarball) as tf:
-        tf.extractall(src, filter="data")
-    root = next(p for p in src.iterdir() if p.is_dir())
-    chart = root / "deploy" / "rustfs-operator"
+    chart = extract_tarball_root(tarball, Path("rustfs-operator-src")) / "deploy" / "rustfs-operator"
     _prepare_rustfs_chart_transition(runner)
     runner.run(c.rustfs_operator_install(str(chart)))
 
