@@ -315,7 +315,7 @@ reproducible; nothing floats on `latest`. Bump these constants to move:
 |------|-----------------|-------|
 | Materialize (operator chart + environmentd) | `DEFAULT_VERSION` (`config.py`); `-v`/`-o` override, `-v latest` resolves from the helm repo | `v26.41.0` |
 | k3s image k3d boots | `K3S_IMAGE` (`commands.py`) | `rancher/k3s:v1.35.5-k3s1` |
-| RustFS operator chart tag + image | `RUSTFS_OPERATOR_VERSION`, `RUSTFS_OPERATOR_IMAGE_TAG` (`commands.py`) | `0.07` |
+| RustFS operator chart tag + image | `RUSTFS_OPERATOR_VERSION`, `RUSTFS_OPERATOR_IMAGE_TAG` (`commands.py`) | `0.0.7` |
 | RustFS server | `RUSTFS_IMAGE` (`commands.py`) | `rustfs/rustfs:1.0.0-beta.12` |
 | MinIO client (persist wipe, bucket setup) | `MC_IMAGE` (`commands.py`) | `minio/mc:RELEASE.2025-08-13T08-35-41Z` |
 | metrics-server chart | `METRICS_SERVER_CHART_VERSION` (`commands.py`) | `3.14.0` |

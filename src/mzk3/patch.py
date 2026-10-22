@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-_ENVIRONMENTD_RE = re.compile(r"environmentdImageRef: materialize/environmentd:v[0-9.]*")
+# Matches the whole tag, including prerelease suffixes like `-dev.0`.
+_ENVIRONMENTD_RE = re.compile(r"environmentdImageRef: materialize/environmentd:[\w.-]+")
 
 
 def patch_region(text: str) -> str:

@@ -27,13 +27,19 @@ def test_k3d_create_cluster_carries_label():
 
 
 def test_rustfs_operator_install_pins_the_operator_image():
-    argv = c.rustfs_operator_install("rustfs-operator-src/operator-0.07/deploy/rustfs-operator")
+    argv = c.rustfs_operator_install("rustfs-operator-src/operator-0.0.7/deploy/rustfs-operator")
     assert argv[:4] == ["helm", "upgrade", "--install", "rustfs-operator"]
-    assert "rustfs-operator-src/operator-0.07/deploy/rustfs-operator" in argv
+    assert "rustfs-operator-src/operator-0.0.7/deploy/rustfs-operator" in argv
     assert "--namespace" in argv and argv[argv.index("--namespace") + 1] == "rustfs-system"
-    # chart 0.07's appVersion lags its tag, so the image tag is set explicitly
+    # chart 0.0.7's appVersion (0.0.6) lags its tag, so the image tag is set explicitly
     assert f"operator.image.tag={c.RUSTFS_OPERATOR_IMAGE_TAG}" in argv
     assert c.RUSTFS_OPERATOR_IMAGE_TAG == c.RUSTFS_OPERATOR_VERSION
+
+
+def test_rustfs_operator_install_disables_sts():
+    argv = c.rustfs_operator_install("chart")
+    assert "sts.enabled=false" in argv
+    assert argv[argv.index("sts.enabled=false") - 1] == "--set"
 
 
 def test_every_pinned_reference_names_an_exact_version():

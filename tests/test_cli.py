@@ -12,6 +12,7 @@ from mzk3.cli import (
     _mz_base_metrics_path,
     _rustfs_tenant,
     ensure_operator_chart_version,
+    extract_tarball_root,
     _upgrade_plan,
     is_mzk3_cluster,
     list_mzk3_clusters,
@@ -454,3 +455,21 @@ def test_install_switches_kubectl_context_before_prerequisites(license_file):
     assert merge is not None, "context was never switched to the target cluster"
     assert cluster_info is not None
     assert merge < cluster_info
+
+
+def test_extract_tarball_root_ignores_a_previous_release(tmp_path):
+    import tarfile
+
+    chart = tmp_path / "build" / "operator-0.0.7" / "deploy" / "rustfs-operator"
+    chart.mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("version: 0.0.6\n")
+    tarball = tmp_path / "rustfs-operator.tar.gz"
+    with tarfile.open(tarball, "w:gz") as tf:
+        tf.add(tmp_path / "build" / "operator-0.0.7", arcname="operator-0.0.7")
+    dest = tmp_path / "rustfs-operator-src"
+    (dest / "operator-0.07").mkdir(parents=True)
+
+    root = extract_tarball_root(str(tarball), dest)
+
+    assert root == dest / "operator-0.0.7"
+    assert [p.name for p in dest.iterdir()] == ["operator-0.0.7"]
