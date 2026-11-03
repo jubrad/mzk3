@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-_ENVIRONMENTD_RE = re.compile(r"environmentdImageRef: materialize/environmentd:v[0-9.]*")
+_ENVIRONMENTD_RE = re.compile(r"environmentdImageRef: materialize/environmentd:v\S*")
 
 
 def patch_region(text: str) -> str:

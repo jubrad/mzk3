@@ -107,3 +107,11 @@ def test_patch_environmentd_resources_idempotent():
     once = patch_environmentd_resources(_CR, "2")
     twice = patch_environmentd_resources(once, "2")
     assert once == twice
+
+
+def test_patch_environmentd_image_replaces_prerelease_suffix():
+    text = "environmentdImageRef: materialize/environmentd:v26.41.0-rc.1\nnext: line"
+    assert (
+        patch_environmentd_image(text, "materialize/environmentd:v27.0.0")
+        == "environmentdImageRef: materialize/environmentd:v27.0.0\nnext: line"
+    )

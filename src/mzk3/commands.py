@@ -31,8 +31,8 @@ def monitoring_tarball_url(version: str = MONITORING_VERSION) -> str:
 # in-repo helm chart. Operator requires S3 credentials >= 8 chars. The chart
 # alone doesn't pin the operator image (its appVersion lags the release tag),
 # so the image tag is set explicitly to the same release.
-RUSTFS_OPERATOR_VERSION = "0.07"
-RUSTFS_OPERATOR_IMAGE_TAG = "0.07"
+RUSTFS_OPERATOR_VERSION = "0.0.7"
+RUSTFS_OPERATOR_IMAGE_TAG = "0.0.7"
 # The operator refuses a Tenant whose RustFS image it can't verify for its
 # RuntimeDefault seccomp profile: only `1.0.0-beta.9`+ betas or `>=1.0.0`
 # release tags pass (no `latest`, no `-rc.N`, no digests).
@@ -62,6 +62,9 @@ def rustfs_operator_install(chart_dir: str) -> list[str]:
         "helm", "upgrade", "--install", "rustfs-operator", chart_dir,
         "--namespace", "rustfs-system", "--create-namespace",
         "--set", f"operator.image.tag={RUSTFS_OPERATOR_IMAGE_TAG}",
+        # mzk3 does not use the operator STS endpoint, which needs a pre-created
+        # `sts-tls` Secret or the operator exits at startup.
+        "--set", "sts.enabled=false",
         "--wait", "--timeout", "5m",
     ]
 
